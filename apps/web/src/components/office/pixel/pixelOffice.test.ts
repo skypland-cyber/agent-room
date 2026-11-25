@@ -212,7 +212,8 @@ describe('what each agent is doing', () => {
     expect(scenes[0]?.zone).toBe('lounge');
     expect(scenes[0]?.pose).toBe('sit');
     expect(scenes[1]?.zone).toBe('pantry');
-    expect(scenes[1]?.bubble).toBe('free');
+    // Korean is the default language, so the bubble over an idle agent is 대기.
+    expect(scenes[1]?.bubble).toBe('대기');
   });
 
   it('draws offline staff faded at their desk with a Zzz', () => {

@@ -26,6 +26,8 @@ import { drawBubble, drawCharacter, drawDesk, drawMoveMarker, drawNameTag, drawN
 import { buildStaticLayer } from './paintScene.js';
 import { planScenes, type AgentScene } from './scene.js';
 import { OfficeAgentPanel } from './OfficeAgentPanel.js';
+import { t, useI18n, type MessageKey } from '../../../i18n/index.js';
+import { presenceCounts } from '../../../i18n/labels.js';
 
 const WALK_SPEED = 74; // px per second for the boss
 const STAFF_SPEED = 46;
@@ -43,6 +45,14 @@ interface Runner {
 }
 
 const key = (tile: Point) => `${tile.x},${tile.y}`;
+
+/** The D-pad's accessible names, one per direction. */
+const WALK_LABELS: Record<string, MessageKey> = {
+  up: 'pixel.walk.up',
+  down: 'pixel.walk.down',
+  left: 'pixel.walk.left',
+  right: 'pixel.walk.right',
+};
 
 function createRunner(x: number, y: number, facing: Facing = 'down'): Runner {
   return { x, y, path: [], facing, frame: 0, moving: false, goal: '' };
@@ -146,6 +156,7 @@ interface Props {
 }
 
 export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChanged }: Props) {
+  const { t, lang } = useI18n();
   const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const staticRef = useRef<HTMLCanvasElement | null>(null);
@@ -162,7 +173,9 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
   const [nearAgent, setNearAgent] = useState<OfficeAgentView | null>(null);
 
   const agents = overview.agents;
-  const scenes = useMemo(() => planScenes(agents, overview), [agents, overview]);
+  // `lang` is a dependency because the speech bubbles are sentences: switching
+  // to EN must re-plan them, not keep Korean over the heads.
+  const scenes = useMemo(() => planScenes(agents, overview), [agents, overview, lang]);
   sceneRef.current = scenes;
 
   const grid = useMemo(() => buildOfficeGrid(agents.length), [agents.length]);
@@ -285,7 +298,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
           moving: player.moving,
           alpha: 1,
         });
-        drawNameTag(ctx, player.x, player.y - 25, overview.ownerName?.trim() || 'YOU', '#b45309');
+        drawNameTag(ctx, player.x, player.y - 25, overview.ownerName?.trim() || t('pixel.you'), '#b45309');
       },
     });
 
@@ -508,7 +521,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
     const counts = new Map<string, number>();
     for (const agent of agents) counts.set(agent.presence.status, (counts.get(agent.presence.status) ?? 0) + 1);
     return counts;
-  }, [agents]);
+  }, [agents, lang]);
 
   const shellClass = fullscreen.active
     ? 'fixed inset-0 z-50 flex flex-col overflow-hidden bg-[#0b0f16]'
@@ -518,24 +531,24 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
     <div ref={element => { fullscreen.target.current = element; }} className={shellClass}>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-[#131a26] px-3 py-2 text-white sm:px-4">
         <div className="min-w-0">
-          <p className="truncate text-[13px] font-semibold tracking-tight">The office floor</p>
+          <p className="truncate text-[13px] font-semibold tracking-tight">{t('pixel.title')}</p>
           <p className="truncate text-[10px] text-white/55">
             {agents.length === 0
-              ? 'No AI staff yet — add the first one to give it a desk.'
-              : `${agents.length} staff · ${countsLine(legend)}`}
+              ? t('pixel.subtitleEmpty')
+              : t('pixel.subtitle', { staff: agents.length, counts: presenceCounts(legend) })}
           </p>
         </div>
         <div className="flex items-center gap-1.5">
           <button type="button" onClick={() => onSelect(undefined)} className="hidden rounded-md px-2 py-1 text-[10px] font-semibold text-white/60 hover:text-white sm:block">
-            hint: WASD / arrows · Space to talk
+            {t('pixel.hint')}
           </button>
           <button
             type="button"
             onClick={() => void fullscreen.toggle()}
-            title={fullscreen.active ? 'Leave fullscreen' : 'Fullscreen'}
+            title={fullscreen.active ? t('pixel.exitFullscreen') : t('pixel.fullscreen')}
             className="rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-semibold text-white/85 transition hover:bg-white/10"
           >
-            {fullscreen.active ? '✕ Exit fullscreen' : '⛶ Fullscreen'}
+            {fullscreen.active ? `✕ ${t('pixel.exitFullscreen')}` : `⛶ ${t('pixel.fullscreen')}`}
           </button>
         </div>
       </div>
@@ -550,7 +563,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
           className="block h-full w-full touch-none select-none"
           style={{ imageRendering: 'pixelated', cursor: 'crosshair' }}
           role="img"
-          aria-label={`Pixel office floor with ${agents.length} AI staff. Walk with the arrow keys or tap the floor, and press space near a character to see its work.`}
+          aria-label={t('pixel.aria', { count: agents.length })}
         />
 
         {/* Touch D-pad */}
@@ -566,7 +579,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
               <button
                 key={direction}
                 type="button"
-                aria-label={`Walk ${direction}`}
+                aria-label={WALK_LABELS[direction] ? t(WALK_LABELS[direction]!) : direction}
                 className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-lg border border-white/25 bg-black/45 text-[12px] text-white/90 backdrop-blur-sm active:bg-white/25"
                 onPointerDown={event => { event.preventDefault(); padPress(direction, true); }}
                 onPointerUp={() => padPress(direction, false)}
@@ -585,7 +598,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
             onClick={() => onSelect(nearAgent.id)}
             className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/25 bg-black/60 px-3 py-1.5 text-[11px] font-semibold text-white backdrop-blur-sm"
           >
-            Space · talk to {nearAgent.name}
+            Space · {t('pixel.talk', { name: nearAgent.name })}
           </button>
         ) : hint ? (
           <p className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/55 px-3 py-1.5 text-[11px] text-white/85">{hint}</p>
@@ -594,10 +607,10 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
         {agents.length === 0 ? (
           <div className="absolute inset-0 flex items-center justify-center bg-black/45">
             <div className="rounded-xl border border-white/15 bg-[#131a26] px-5 py-4 text-center">
-              <p className="text-sm font-semibold text-white">The office is empty</p>
-              <p className="mt-1 text-[11px] leading-relaxed text-white/60">Add the first AI employee and its desk appears in the dev lab.</p>
+              <p className="text-sm font-semibold text-white">{t('pixel.empty.title')}</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-white/60">{t('pixel.empty.body')}</p>
               <button type="button" onClick={onAddStaff} className="mt-3 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-ink">
-                Add AI staff
+                {t('pixel.empty.add')}
               </button>
             </div>
           </div>
@@ -620,12 +633,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
 }
 
 function countsLine(counts: Map<string, number>): string {
-  const order = ['working', 'reviewing', 'idle', 'paused', 'offline'];
-  const label: Record<string, string> = { working: 'working', reviewing: 'reviewing', idle: 'free', paused: 'paused', offline: 'offline' };
-  return order
-    .filter(status => (counts.get(status) ?? 0) > 0)
-    .map(status => `${counts.get(status)} ${label[status]}`)
-    .join(' · ');
+  return presenceCounts(counts);
 }
 
 export { MAP_H as PIXEL_OFFICE_HEIGHT, MAP_W as PIXEL_OFFICE_WIDTH, TILE as PIXEL_OFFICE_TILE };

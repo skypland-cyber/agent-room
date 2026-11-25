@@ -8,6 +8,7 @@ import {
   addGuideline, addMemory, deleteGuideline, deleteMemory, deleteProject, saveProject, updateGuideline, updateMemory,
 } from '../../lib/officeApi.js';
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, SectionTitle, TextArea, formatDate, useOfficeAction } from './ui.js';
+import { useI18n } from '../../i18n/index.js';
 
 interface Props {
   projects: OfficeProjectSummary[];
@@ -15,6 +16,7 @@ interface Props {
 }
 
 export function OfficeProjectsPanel({ projects, onChanged }: Props) {
+  const { t } = useI18n();
   const [selected, setSelected] = useState<string | null>(projects[0]?.id ?? null);
   const [form, setForm] = useState({ id: '', name: '', description: '' });
   const [memory, setMemory] = useState({ title: '', body: '', tags: '', pinned: false });
@@ -32,10 +34,10 @@ export function OfficeProjectsPanel({ projects, onChanged }: Props) {
     <div className="grid gap-5 lg:grid-cols-[1fr_1.6fr]">
       <div className="grid gap-5">
         <Card>
-          <SectionTitle title="Projects" hint="Independent workspaces. Each keeps its own memory and instructions." />
+          <SectionTitle title={t('projects.title')} hint={t('projects.hint')} />
           <ErrorNote error={error} />
           {projects.length === 0 ? (
-            <Empty>No projects yet. Create one below — a client, a product line, a recurring job.</Empty>
+            <Empty>{t('projects.empty')}</Empty>
           ) : (
             <ul className="mt-2 grid gap-1.5">
               {projects.map(item => (
@@ -49,10 +51,10 @@ export function OfficeProjectsPanel({ projects, onChanged }: Props) {
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-semibold text-ink">{item.name}</span>
-                      {item.status === 'archived' ? <Badge>Archived</Badge> : <Badge tone="good">Active</Badge>}
+                      {item.status === 'archived' ? <Badge>{t('projects.badge.archived')}</Badge> : <Badge tone="good">{t('projects.badge.active')}</Badge>}
                     </div>
                     <p className="mt-0.5 line-clamp-1 text-[11px] text-ink-soft">
-                      {item.memoryCount} memories · {item.guidelineCount} instructions · {item.taskRefs.length} linked tasks
+                      {t('projects.meta', { memory: item.memoryCount, guideline: item.guidelineCount, tasks: item.taskRefs.length })}
                     </p>
                   </button>
                 </li>
@@ -62,14 +64,14 @@ export function OfficeProjectsPanel({ projects, onChanged }: Props) {
         </Card>
 
         <Card>
-          <SectionTitle title={form.id ? 'Edit project' : 'New project'} />
+          <SectionTitle title={form.id ? t('projects.form.editTitle') : t('projects.form.newTitle')} />
           <form
             className="grid gap-3"
             onSubmit={event => { event.preventDefault(); void createProject(); }}
           >
-            <Field label="Name"><Input value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} required maxLength={80} placeholder="Acme rebrand" /></Field>
-            <Field label="Description"><TextArea value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} maxLength={1000} placeholder="Q1 print catalogue and plaques" /></Field>
-            <Button type="submit" disabled={busy !== null}>Create project</Button>
+            <Field label={t('projects.form.name')}><Input value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} required maxLength={80} placeholder={t('projects.form.namePlaceholder')} /></Field>
+            <Field label={t('projects.form.description')}><TextArea value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} maxLength={1000} placeholder={t('projects.form.descriptionPlaceholder')} /></Field>
+            <Button type="submit" disabled={busy !== null}>{t('projects.form.create')}</Button>
           </form>
         </Card>
       </div>
@@ -81,7 +83,7 @@ export function OfficeProjectsPanel({ projects, onChanged }: Props) {
           busy={busy}
           run={run}
           onDelete={() => {
-            if (!window.confirm(`Delete ${project.name}? Its memory and instructions go with it (meeting archives stay).`)) return;
+            if (!window.confirm(t('projects.delete.confirm', { name: project.name }))) return;
             void run('delete-project', () => deleteProject(project.id));
           }}
           memoryForm={memory}
@@ -90,7 +92,7 @@ export function OfficeProjectsPanel({ projects, onChanged }: Props) {
           setGuidelineForm={setGuideline}
         />
       ) : (
-        <Card><Empty>Pick a project to see its memory and instructions.</Empty></Card>
+        <Card><Empty>{t('projects.pick')}</Empty></Card>
       )}
     </div>
   );
@@ -108,6 +110,7 @@ interface DetailProps {
 }
 
 function ProjectDetail({ project, busy, run, onDelete, memoryForm, setMemoryForm, guidelineForm, setGuidelineForm }: DetailProps) {
+  const { t } = useI18n();
   const [editingMemory, setEditingMemory] = useState<string | null>(null);
   const [editingGuideline, setEditingGuideline] = useState<string | null>(null);
 
@@ -131,14 +134,14 @@ function ProjectDetail({ project, busy, run, onDelete, memoryForm, setMemoryForm
       <Card>
         <SectionTitle
           title={project.name}
-          hint={project.description || 'No description yet.'}
-          action={<Button variant="danger" onClick={onDelete} disabled={busy !== null}>Delete</Button>}
+          hint={project.description || t('projects.detail.noDescription')}
+          action={<Button variant="danger" onClick={onDelete} disabled={busy !== null}>{t('common.delete')}</Button>}
         />
         <dl className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
-          <div><dt className="text-ink-faint">Status</dt><dd className="font-semibold text-ink">{project.status}</dd></div>
-          <div><dt className="text-ink-faint">Memories</dt><dd className="font-semibold text-ink">{project.memory.length}</dd></div>
-          <div><dt className="text-ink-faint">Instructions</dt><dd className="font-semibold text-ink">{project.guidelines.length}</dd></div>
-          <div><dt className="text-ink-faint">Created</dt><dd className="font-semibold text-ink">{formatDate(project.createdAt)}</dd></div>
+          <div><dt className="text-ink-faint">{t('projects.detail.status')}</dt><dd className="font-semibold text-ink">{project.status === 'archived' ? t('projects.badge.archived') : t('projects.badge.active')}</dd></div>
+          <div><dt className="text-ink-faint">{t('projects.detail.memories')}</dt><dd className="font-semibold text-ink">{project.memory.length}</dd></div>
+          <div><dt className="text-ink-faint">{t('projects.detail.instructions')}</dt><dd className="font-semibold text-ink">{project.guidelines.length}</dd></div>
+          <div><dt className="text-ink-faint">{t('projects.detail.created')}</dt><dd className="font-semibold text-ink">{formatDate(project.createdAt)}</dd></div>
         </dl>
         {project.roomCodes.length > 0 ? (
           <div className="mt-3 flex flex-wrap gap-1.5">
@@ -150,8 +153,8 @@ function ProjectDetail({ project, busy, run, onDelete, memoryForm, setMemoryForm
       </Card>
 
       <Card>
-        <SectionTitle title="Long-term memory" hint="Facts the agents should carry into every meeting for this project." />
-        {project.memory.length === 0 ? <Empty>Nothing remembered yet.</Empty> : (
+        <SectionTitle title={t('projects.memory.title')} hint={t('projects.memory.hint')} />
+        {project.memory.length === 0 ? <Empty>{t('projects.memory.empty')}</Empty> : (
           <ul className="grid gap-2">
             {project.memory.map(entry => (
               <li key={entry.id} className="rounded-xl border border-border-faint bg-surface-soft p-3">
@@ -168,7 +171,7 @@ function ProjectDetail({ project, busy, run, onDelete, memoryForm, setMemoryForm
                     <Button variant="quiet" onClick={() => {
                       setEditingMemory(entry.id);
                       setMemoryForm({ title: entry.title, body: entry.body, tags: entry.tags.join(', '), pinned: entry.pinned });
-                    }}>Edit</Button>
+                    }}>{t('common.edit')}</Button>
                     <Button variant="danger" disabled={busy !== null}
                       onClick={() => void run('memory', () => deleteMemory(project.id, entry.id))}>×</Button>
                   </div>
@@ -180,26 +183,26 @@ function ProjectDetail({ project, busy, run, onDelete, memoryForm, setMemoryForm
         <form className="mt-3 grid gap-2 rounded-xl border border-dashed border-border p-3"
           onSubmit={event => { event.preventDefault(); void saveMemoryEntry(); }}>
           <div className="grid gap-2 sm:grid-cols-[1fr_1fr]">
-            <Input value={memoryForm.title} onChange={event => setMemoryForm({ ...memoryForm, title: event.target.value })} placeholder="Title (e.g. Tone of voice)" maxLength={120} />
-            <Input value={memoryForm.tags} onChange={event => setMemoryForm({ ...memoryForm, tags: event.target.value })} placeholder="tags, comma separated" />
+            <Input value={memoryForm.title} onChange={event => setMemoryForm({ ...memoryForm, title: event.target.value })} placeholder={t('projects.memory.titlePlaceholder')} maxLength={120} />
+            <Input value={memoryForm.tags} onChange={event => setMemoryForm({ ...memoryForm, tags: event.target.value })} placeholder={t('projects.memory.tagsPlaceholder')} />
           </div>
-          <TextArea value={memoryForm.body} onChange={event => setMemoryForm({ ...memoryForm, body: event.target.value })} placeholder="What should be remembered?" required />
+          <TextArea value={memoryForm.body} onChange={event => setMemoryForm({ ...memoryForm, body: event.target.value })} placeholder={t('projects.memory.bodyPlaceholder')} required />
           <div className="flex items-center justify-between">
             <label className="flex items-center gap-2 text-[11px] text-ink-muted">
               <input type="checkbox" checked={memoryForm.pinned} onChange={event => setMemoryForm({ ...memoryForm, pinned: event.target.checked })} />
-              Pin to the top
+              {t('projects.memory.pin')}
             </label>
             <div className="flex gap-1.5">
-              {editingMemory ? <Button variant="ghost" onClick={() => { setEditingMemory(null); setMemoryForm({ title: '', body: '', tags: '', pinned: false }); }}>Cancel</Button> : null}
-              <Button type="submit" disabled={busy !== null}>{editingMemory ? 'Save memory' : 'Remember this'}</Button>
+              {editingMemory ? <Button variant="ghost" onClick={() => { setEditingMemory(null); setMemoryForm({ title: '', body: '', tags: '', pinned: false }); }}>{t('common.cancel')}</Button> : null}
+              <Button type="submit" disabled={busy !== null}>{editingMemory ? t('projects.memory.save') : t('projects.memory.remember')}</Button>
             </div>
           </div>
         </form>
       </Card>
 
       <Card>
-        <SectionTitle title="Work instructions" hint="Rules every agent follows on this project — read with each assignment." />
-        {project.guidelines.length === 0 ? <Empty>No standing instructions yet.</Empty> : (
+        <SectionTitle title={t('projects.guide.title')} hint={t('projects.guide.hint')} />
+        {project.guidelines.length === 0 ? <Empty>{t('projects.guide.empty')}</Empty> : (
           <ol className="grid gap-2">
             {project.guidelines.map((entry, index) => (
               <li key={entry.id} className="rounded-xl border border-border-faint bg-white p-3">
@@ -212,7 +215,7 @@ function ProjectDetail({ project, busy, run, onDelete, memoryForm, setMemoryForm
                     <Button variant="quiet" onClick={() => {
                       setEditingGuideline(entry.id);
                       setGuidelineForm({ title: entry.title, body: entry.body });
-                    }}>Edit</Button>
+                    }}>{t('common.edit')}</Button>
                     <Button variant="danger" disabled={busy !== null}
                       onClick={() => void run('guideline', () => deleteGuideline(project.id, entry.id))}>×</Button>
                   </div>
@@ -223,11 +226,11 @@ function ProjectDetail({ project, busy, run, onDelete, memoryForm, setMemoryForm
         )}
         <form className="mt-3 grid gap-2 rounded-xl border border-dashed border-border p-3"
           onSubmit={event => { event.preventDefault(); void saveGuidelineEntry(); }}>
-          <Input value={guidelineForm.title} onChange={event => setGuidelineForm({ ...guidelineForm, title: event.target.value })} placeholder="Instruction title (e.g. Print specs)" maxLength={160} />
-          <TextArea value={guidelineForm.body} onChange={event => setGuidelineForm({ ...guidelineForm, body: event.target.value })} placeholder="CMYK only, 300dpi, no bleed under 3mm." required />
+          <Input value={guidelineForm.title} onChange={event => setGuidelineForm({ ...guidelineForm, title: event.target.value })} placeholder={t('projects.guide.titlePlaceholder')} maxLength={160} />
+          <TextArea value={guidelineForm.body} onChange={event => setGuidelineForm({ ...guidelineForm, body: event.target.value })} placeholder={t('projects.guide.bodyPlaceholder')} required />
           <div className="flex justify-end gap-1.5">
-            {editingGuideline ? <Button variant="ghost" onClick={() => { setEditingGuideline(null); setGuidelineForm({ title: '', body: '' }); }}>Cancel</Button> : null}
-            <Button type="submit" disabled={busy !== null}>{editingGuideline ? 'Save instruction' : 'Add instruction'}</Button>
+            {editingGuideline ? <Button variant="ghost" onClick={() => { setEditingGuideline(null); setGuidelineForm({ title: '', body: '' }); }}>{t('common.cancel')}</Button> : null}
+            <Button type="submit" disabled={busy !== null}>{editingGuideline ? t('projects.guide.save') : t('projects.guide.add')}</Button>
           </div>
         </form>
       </Card>

@@ -5,22 +5,25 @@ import { useEffect, useState } from 'react';
 import type { OfficeArchive, OfficeAuditEntry } from '@agent-room/shared';
 import { getArchive, listArchives, listAudit, type ArchiveSummary } from '../../lib/officeApi.js';
 import { Badge, Button, Card, Empty, ErrorNote, Input, SectionTitle, formatDate, timeAgo, useOfficeAction } from './ui.js';
+import { useI18n, type MessageKey } from '../../i18n/index.js';
+import { auditActionLabel } from '../../i18n/labels.js';
 
 interface Props {
   onChanged: () => void;
 }
 
-const ACTION_TONES: Array<{ label: string; value: string; tone: 'neutral' | 'info' | 'warn' | 'bad' }> = [
-  { label: 'Everything', value: '', tone: 'neutral' },
-  { label: 'Sign-ins', value: 'login', tone: 'info' },
-  { label: 'Staff', value: 'agent.', tone: 'info' },
-  { label: 'Tasks', value: 'task.', tone: 'warn' },
-  { label: 'Files', value: 'file.', tone: 'info' },
-  { label: 'Projects', value: 'project.', tone: 'info' },
-  { label: 'Backup & settings', value: 'backup.', tone: 'bad' },
+const ACTION_TONES: Array<{ labelKey: MessageKey; value: string }> = [
+  { labelKey: 'record.filter.all', value: '' },
+  { labelKey: 'record.filter.login', value: 'login' },
+  { labelKey: 'record.filter.staff', value: 'agent.' },
+  { labelKey: 'record.filter.tasks', value: 'task.' },
+  { labelKey: 'record.filter.files', value: 'file.' },
+  { labelKey: 'record.filter.projects', value: 'project.' },
+  { labelKey: 'record.filter.backup', value: 'backup.' },
 ];
 
 export function OfficeArchivePanel({ onChanged }: Props) {
+  const { t } = useI18n();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ArchiveSummary[]>([]);
   const [selected, setSelected] = useState<OfficeArchive | null>(null);
@@ -57,19 +60,19 @@ export function OfficeArchivePanel({ onChanged }: Props) {
     <div className="grid gap-5 lg:grid-cols-[1.15fr_1fr]">
       <Card>
         <SectionTitle
-          title="Meeting archive"
-          hint="Every ended meeting is kept forever, with its transcript and board. Search reaches the words spoken, not just the topic."
+          title={t('record.archive.title')}
+          hint={t('record.archive.hint')}
         />
         <form
           className="flex gap-2"
           onSubmit={event => { event.preventDefault(); void search(query); }}
         >
-          <Input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search minutes — e.g. plaques, 견적, Prime Gift" />
-          <Button type="submit" disabled={searching}>{searching ? 'Searching…' : 'Search'}</Button>
+          <Input value={query} onChange={event => setQuery(event.target.value)} placeholder={t('record.archive.placeholder')} />
+          <Button type="submit" disabled={searching}>{searching ? t('record.archive.searching') : t('common.search')}</Button>
         </form>
         <ErrorNote error={error} />
         {results.length === 0 ? (
-          <div className="mt-3"><Empty>{query ? `No minutes match “${query}”.` : 'No archived meetings yet. Ending a room archives it automatically.'}</Empty></div>
+          <div className="mt-3"><Empty>{query ? t('record.archive.emptyMatch', { query }) : t('record.archive.emptyAll')}</Empty></div>
         ) : (
           <ul className="mt-3 grid max-h-[320px] gap-1.5 overflow-y-auto pr-1">
             {results.map(archive => (
@@ -83,7 +86,7 @@ export function OfficeArchivePanel({ onChanged }: Props) {
                     <span className="shrink-0 text-[10px] text-ink-faint">{formatDate(archive.archivedAt)}</span>
                   </div>
                   <p className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-ink-soft">{archive.snippet}</p>
-                  <p className="mt-0.5 font-mono text-[10px] text-ink-faint">{archive.roomCode} · {archive.messageCount} messages</p>
+                  <p className="mt-0.5 font-mono text-[10px] text-ink-faint">{archive.roomCode} · {t('record.archive.messages', { count: archive.messageCount })}</p>
                 </button>
               </li>
             ))}
@@ -94,7 +97,7 @@ export function OfficeArchivePanel({ onChanged }: Props) {
           <div className="mt-4 rounded-xl border border-border bg-surface-soft p-3">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-xs font-semibold text-ink">{selected.topic} · {selected.roomCode}</h3>
-              <Button variant="quiet" onClick={() => setSelected(null)}>Close</Button>
+              <Button variant="quiet" onClick={() => setSelected(null)}>{t('common.close')}</Button>
             </div>
             <pre className="mt-2 max-h-[360px] overflow-auto whitespace-pre-wrap rounded-lg bg-white p-3 text-[11px] leading-relaxed text-ink-muted">
               {selected.minutes}
@@ -105,9 +108,9 @@ export function OfficeArchivePanel({ onChanged }: Props) {
 
       <Card>
         <SectionTitle
-          title="Work log"
-          hint="Who did what, when. Append-only; the newest 1,000 entries are kept."
-          action={<Button variant="ghost" disabled={busy !== null} onClick={() => void run('reload', () => listAudit({ limit: 100 }))}>Refresh</Button>}
+          title={t('record.audit.title')}
+          hint={t('record.audit.hint')}
+          action={<Button variant="ghost" disabled={busy !== null} onClick={() => void run('reload', () => listAudit({ limit: 100 }))}>{t('record.audit.refresh')}</Button>}
         />
         <div className="mb-3 flex flex-wrap gap-1.5">
           {ACTION_TONES.map(tab => (
@@ -115,17 +118,17 @@ export function OfficeArchivePanel({ onChanged }: Props) {
               className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition ${
                 auditAction === tab.value ? 'bg-ink text-white' : 'bg-surface-sunken text-ink-muted hover:text-ink'
               }`}>
-              {tab.label}
+              {t(tab.labelKey)}
             </button>
           ))}
         </div>
-        <Input value={auditActor} onChange={event => setAuditActor(event.target.value)} placeholder="Filter by who (e.g. owner, Qwen)" className="!py-1.5 !text-xs" />
+        <Input value={auditActor} onChange={event => setAuditActor(event.target.value)} placeholder={t('record.audit.actorPlaceholder')} className="!py-1.5 !text-xs" />
         <ul className="mt-3 max-h-[520px] divide-y divide-border-faint overflow-y-auto pr-1">
-          {entries.length === 0 ? <Empty>No entries for this filter.</Empty> : entries.map(entry => (
+          {entries.length === 0 ? <Empty>{t('record.audit.empty')}</Empty> : entries.map(entry => (
             <li key={entry.id} className="py-2">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge tone={entry.action.startsWith('task.') ? 'warn' : entry.action.startsWith('backup.') ? 'bad' : 'neutral'}>
-                  {entry.action}
+                  {auditActionLabel(entry.action)}
                 </Badge>
                 <span className="text-[11px] font-semibold text-ink">{entry.actor.name}</span>
                 {entry.target ? <span className="font-mono text-[10px] text-ink-faint">{entry.target}</span> : null}

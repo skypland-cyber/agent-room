@@ -73,19 +73,19 @@ describe('office screens render', () => {
       <PixelOffice overview={overview} onSelect={() => undefined} onAddStaff={() => undefined} onChanged={() => undefined} />,
     );
     expect(html).toContain('<canvas');
-    expect(html).toContain('The office floor');
-    expect(html).toContain('5 staff');
-    expect(html).toContain('1 working');
-    expect(html).toContain('1 offline');
-    expect(html).toContain('Fullscreen');
+    expect(html).toContain('사무실 평면도');
+    expect(html).toContain('5명 근무');
+    expect(html).toContain('1명 작업 중');
+    expect(html).toContain('1명 오프라인');
+    expect(html).toContain('전체화면');
   });
 
   it('shows the empty office instead of a blank canvas', () => {
     const html = renderToStaticMarkup(
       <PixelOffice overview={{ ...overview, agents: [] }} selectedId={undefined} onSelect={() => undefined} onAddStaff={() => undefined} onChanged={() => undefined} />,
     );
-    expect(html).toContain('The office is empty');
-    expect(html).toContain('Add AI staff');
+    expect(html).toContain('오피스가 비어 있습니다');
+    expect(html).toContain('AI 직원 추가');
   });
 
   it('opens a character sheet with its work, limits and order form', () => {
@@ -93,32 +93,32 @@ describe('office screens render', () => {
       <OfficeAgentPanel agent={agents[0]!} overview={overview} onClose={() => undefined} onChanged={() => undefined} />,
     );
     expect(html).toContain('Qwen role');
-    expect(html).toContain('Today');
-    expect(html).toContain('New work order');
-    expect(html).toContain('Send work order');
-    expect(html).toContain('Pause this AI');
+    expect(html).toContain('오늘');
+    expect(html).toContain('새 업무 지시');
+    expect(html).toContain('업무 지시 보내기');
+    expect(html).toContain('이 직원 일시정지');
   });
 
   it('renders the staff roster with limits and state', () => {
     const html = renderToStaticMarkup(<OfficeStaffPanel agents={agents} onChanged={() => undefined} />);
     expect(html).toContain('Qwen role');
-    expect(html).toContain('Today 2/20');
+    expect(html).toContain('오늘 2/20');
   });
 
   it('renders projects with memory and instructions', () => {
     const html = renderToStaticMarkup(<OfficeProjectsPanel projects={overview.projects} onChanged={() => undefined} />);
     expect(html).toContain('Acme rebrand');
-    expect(html).toContain('Long-term memory');
+    expect(html).toContain('장기 기억');
     expect(html).toContain('Polite');
-    expect(html).toContain('Work instructions');
+    expect(html).toContain('업무 지침');
   });
 
   it('renders the approval queue and the work controls', () => {
     const html = renderToStaticMarkup(<OfficeWorkPanel overview={overview} onChanged={() => undefined} />);
-    expect(html).toContain('Approvals (1)');
-    expect(html).toContain('Approve');
-    expect(html).toContain('Abort');
-    expect(html).toContain('QA queue (1)');
+    expect(html).toContain('승인 대기 (1)');
+    expect(html).toContain('승인');
+    expect(html).toContain('중단');
+    expect(html).toContain('QA 대기 (1)');
     expect(html).toContain('QWE-RTY-234');
   });
 
@@ -130,11 +130,11 @@ describe('office screens render', () => {
       />,
     );
     expect(automation).toContain('Monthly report');
-    expect(automation).toContain('Run');
+    expect(automation).toContain('실행');
 
     const limits = renderToStaticMarkup(<OfficeSettingsPanel overview={overview} onChanged={() => undefined} />);
-    expect(limits).toContain('Usage and limits');
-    expect(limits).toContain('Download backup');
-    expect(limits).toContain('Restore');
+    expect(limits).toContain('사용량과 한도');
+    expect(limits).toContain('백업 내려받기');
+    expect(limits).toContain('복구');
   });
 });
