@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npm run build",
+  "buildCommand": "npm run build:ordered",
   "outputDirectory": "apps/web/dist",
   "framework": null,
   "rewrites": [

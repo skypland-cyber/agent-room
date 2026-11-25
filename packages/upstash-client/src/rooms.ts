@@ -31,6 +31,7 @@ export interface CreateRoomInput {
   code: string;
   topic: string;
   createdBy: string;
+  requireUnusedCode?: boolean;
   ownerId?: string;
   ownerEmail?: string;
   ownerName?: string;
@@ -86,8 +87,20 @@ export async function createRoom(client: UpstashClient, input: CreateRoomInput):
     projectPromptVersion: input.projectPromptVersion,
     projectPromptUpdatedAt: input.projectPromptUpdatedAt,
   };
-  await client.command(['SET', roomKey(input.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS]);
+  const set = ['SET', roomKey(input.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS];
+  if (input.requireUnusedCode) {
+    if (await client.command([...set, 'NX']) !== 'OK') throw new RoomCodeTakenError(input.code);
+  } else {
+    await client.command(set);
+  }
   return { ...room, hostKey };
+}
+
+export class RoomCodeTakenError extends Error {
+  constructor(code: string) {
+    super(`Room code ${code} is already in use`);
+    this.name = 'RoomCodeTakenError';
+  }
 }
 
 export async function getRoom(client: UpstashClient, code: string): Promise<Room> {
@@ -183,6 +196,7 @@ function isCandidateSeat(p: Participant, createdBy: string): boolean {
 // the web client passes its sessionStorage entry so a refresh on /r/CODE
 // still updates the same row instead of getting a "(2)" suffix.
 export interface JoinRoomOptions {
+  requireSeatProof?: boolean;
   hostKey?: string;
   // Set to the caller's prior identity in the room (from sessionStorage / MCP
   // state). When provided AND it matches an existing participant, that row
@@ -271,8 +285,10 @@ export async function joinRoom(
   // before the synchronous mutator: the presented key's hash, and a fresh key
   // in case the presented one does not match.
   const agentSeat = participant.client === 'cc';
-  const presentedSeatHash = agentSeat && options.seatKey ? await sha256Hex(options.seatKey) : undefined;
-  const freshSeatKey = agentSeat ? generateHostKey() + generateHostKey() : undefined;
+  const keyedSeat = agentSeat || options.requireSeatProof;
+  const presentedSeatHash = keyedSeat && options.seatKey ? await sha256Hex(options.seatKey) : undefined;
+  const presentedHostHash = options.requireSeatProof && options.hostKey ? await sha256Hex(options.hostKey) : undefined;
+  const freshSeatKey = keyedSeat ? generateHostKey() + generateHostKey() : undefined;
   const freshSeatHash = freshSeatKey ? await sha256Hex(freshSeatKey) : undefined;
   let issuedSeatKey: string | undefined;
   const room = await casRoom(client, code, (current) => {
@@ -283,8 +299,15 @@ export async function joinRoom(
     const isOwnerReclaim = Boolean(
       options.authedUserId && current.ownerId && options.authedUserId === current.ownerId,
     );
+    const priorSeat = current.participants.find(p => isPriorIdentity(p, options.priorIdentity));
+    const priorIdentity = !options.requireSeatProof || seatHashMatches(priorSeat?.seatKeyHash, presentedSeatHash)
+      ? options.priorIdentity : undefined;
     // Host claim: exact/case-insensitive createdBy match, or signed-in room owner.
     const isClaimingHost = isOwnerReclaim || namesEqualIgnoreCase(participant.name, current.createdBy);
+
+    if (isClaimingHost && options.requireSeatProof && !seatHashMatches(current.hostKeyHash, presentedHostHash)) {
+      throw new HostNameTakenError(current.createdBy);
+    }
 
     // Interview rooms are 1-on-1 by design: at most one candidate (web,
     // non-host) seat per invite link. Reject a second candidate before
@@ -297,7 +320,7 @@ export async function joinRoom(
       && isCandidateSeat(participant, current.createdBy)
     ) {
       const existingCandidates = current.participants.filter(p => isCandidateSeat(p, current.createdBy));
-      const isReturningSelf = existingCandidates.some(p => isPriorIdentity(p, options.priorIdentity));
+      const isReturningSelf = existingCandidates.some(p => isPriorIdentity(p, priorIdentity));
       if (existingCandidates.length > 0 && !isReturningSelf) {
         throw new InterviewRoomBusyError(current.code);
       }
@@ -317,12 +340,12 @@ export async function joinRoom(
       // them unique across client kinds too (web Robin vs agent Robin).
       // priorIdentity bypasses the suffix when the caller is updating their
       // own previous row.
-      next = { ...next, name: uniqueNameForRoom(participant.name, current, options.priorIdentity) };
+      next = { ...next, name: uniqueNameForRoom(participant.name, current, priorIdentity) };
     }
 
     next = {
       ...next,
-      color: uniqueColorForRoom(next.color, current, options.priorIdentity),
+      color: uniqueColorForRoom(next.color, current, priorIdentity),
     };
 
     // Default canSpeak: TRUE for everyone (host, agents, walk-ins). The
@@ -336,12 +359,15 @@ export async function joinRoom(
     // via setMuted(); muted participants stay in the room (presence intact,
     // can read) but room_send is rejected by appendMessage's findSpeaker
     // gate. Unmute is just setMuted(..., false) flipping it back.
+    if (options.requireSeatProof && priorIdentity && priorSeat) {
+      next = { ...next, canSpeak: priorSeat.canSpeak };
+    }
     if (next.canSpeak === undefined) {
       next = { ...next, canSpeak: true };
     }
-    if (agentSeat && freshSeatHash) {
-      const reclaimed = current.participants.find(p => p.client === 'cc'
-        && (isPriorIdentity(p, options.priorIdentity) || p.name === next.name));
+    if (freshSeatHash) {
+      const reclaimed = current.participants.find(p => p.client === participant.client
+        && (isPriorIdentity(p, priorIdentity) || p.name === next.name));
       const kept = !!reclaimed?.seatKeyHash && seatHashMatches(reclaimed.seatKeyHash, presentedSeatHash);
       next = kept
         ? { ...next, seatKeyHash: reclaimed!.seatKeyHash, seatId: reclaimed!.seatId ?? `key:${reclaimed!.seatKeyHash}` }
@@ -358,10 +384,11 @@ export async function joinRoom(
     // drop every stale web row that matches createdBy case-insensitively
     // so "Robin" + "robin" never coexist with a wrong Host badge.
     const keep = current.participants.filter(p => {
-      if (isClaimingHost && p.client === 'web' && namesEqualIgnoreCase(p.name, current.createdBy)) {
+      if (isClaimingHost && p.client === 'web' && namesEqualIgnoreCase(p.name, current.createdBy)
+          && (!options.requireSeatProof || participant.client === 'web')) {
         return false;
       }
-      if (isPriorIdentity(p, options.priorIdentity)) return false;
+      if (isPriorIdentity(p, priorIdentity)) return false;
       return !(p.name === next.name && p.client === next.client);
     });
 

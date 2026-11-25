@@ -1,3 +1,4 @@
+import { roomProof } from './roomApi.js';
 import type { MessageAttachment } from '@agent-room/shared';
 
 // Tunables — kept in sync with api/upload.ts on the server side. The server
@@ -78,7 +79,11 @@ export async function uploadAttachment(
     } catch { /* non-essential */ }
   }
 
-  const resp = await fetch('/api/upload', { method: 'POST', body: fd });
+  const resp = await fetch('/api/upload', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${roomProof(roomCode).seatKey ?? ''}` },
+    body: fd,
+  });
   if (!resp.ok) {
     let body: { error?: string; message?: string } = {};
     try { body = (await resp.json()) as typeof body; } catch { /* keep empty */ }
@@ -99,7 +104,7 @@ export async function deleteRoomBlobs(roomCode: string): Promise<{ deleted: numb
     const resp = await fetch('/api/delete-room-blobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomCode }),
+      body: JSON.stringify({ roomCode, hostKey: roomProof(roomCode).hostKey }),
     });
     if (!resp.ok) return { deleted: 0 };
     const body = (await resp.json()) as { deleted?: number };

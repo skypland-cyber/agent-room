@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TaskBoard } from '@agent-room/shared';
 import { ROOM_POLL_MS, ROOM_POLL_HIDDEN_MS } from '@agent-room/shared';
-import { createClient, getTaskBoard, publishTaskNotifications } from '@agent-room/upstash-client';
-import { ENV } from '../env.js';
+import { createClient, getTaskBoard, publishTaskNotifications } from '../lib/roomApi.js';
 
 /**
  * Polls the room's task board. The board already exists server-side (created
@@ -15,7 +14,7 @@ export function useTaskBoard(code: string) {
   const [board, setBoard] = useState<TaskBoard | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
-  const clientRef = useRef(createClient(ENV.upstash));
+  const clientRef = useRef(createClient());
   const busyRef = useRef(false);
 
   // Bumped whenever the effect re-runs for a new room. An in-flight fetch

@@ -1,30 +1,11 @@
-// The seam between the MCP tool surface and room storage.
-//
-// The hosted deployment puts an HTTP server in this position: its MCP tools
-// POST to `/api/room`, and that server owns auth, billing and the ledger on
-// top of the room write. This repo has no such server — the web app talks to
-// Upstash directly from the browser (`apps/web/src/screens/CreateMeeting.tsx`,
-// `Join.tsx`, `hooks/useRoom.ts` all import `@agent-room/upstash-client`) —
-// so an HTTP indirection here would be a layer with nothing in it.
-//
-// So this file implements the SAME eleven functions against
-// `@agent-room/upstash-client` directly. `_mcpTools.ts` is written against
-// this module's signatures, never against HTTP, which is what lets the tool
-// surface be shared between the two deployments unchanged.
-//
-// ERROR TRANSLATION IS PART OF THE CONTRACT. `_mcpTools.ts` catches
-// `RemoteRoomApiError` and turns known `code` values into the guidance an
-// agent acts on — "you are muted, wait via room_listen" rather than a stack
-// trace. upstash-client throws its own classes, so every call below is wrapped
-// and re-thrown with the matching code. Miss one and the agent gets a raw
-// error where it expected an instruction, which is exactly the kind of result
-// that makes a model stop calling tools.
-
+import { findSeat } from './_roomAccess.js';
 import { generateCode } from '@agent-room/shared';
 import type { Message, Participant, Room, RoomReport } from '@agent-room/shared';
 import {
   createClient,
   createRoom as storeCreateRoom,
+  RoomCodeTakenError,
+  isConfiguredModerator,
   createRoomReport as storeCreateRoomReport,
   endRoom as storeEndRoom,
   getRoom as storeGetRoom,
@@ -103,10 +84,8 @@ export interface RemoteRoomClient {
 }
 
 export function createRemoteRoomClient(_requestHost: string | undefined): RemoteRoomClient {
-  // Env names match the web app's, so a self-hoster configures one pair of
-  // credentials and both surfaces work.
-  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.VITE_UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.VITE_UPSTASH_REDIS_REST_TOKEN;
+  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
   if (!url || !token) {
     throw new RemoteRoomApiError(
       'Room storage is not configured. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN on the deployment.',
@@ -143,9 +122,7 @@ async function isProvenHost(store: UpstashClient, code: string, hostKey: unknown
 
 /**
  * Publish any pending task responsibility notifications as targeted system
- * messages, then fan each one out to the target's webhooks. There is no
- * server between the web app and storage in this deployment, so this runs
- * after every MCP task write and board read instead of from a room API.
+ * messages, then fan each one out to the target's webhooks.
  * Never fatal: an unpublished intent stays on the board and is retried.
  */
 export async function publishBoardNotifications(store: UpstashClient, code: string): Promise<void> {
@@ -272,14 +249,9 @@ async function dispatchAction(store: UpstashClient, p: Record<string, unknown>):
 
       // ── resident webhooks ───────────────────────────────────────────────
       case 'webhookSet': {
-        // upstash-client's registerRoomWebhook accepts any string. That is
-        // harmless while nothing in this repo calls it, but the moment a
-        // webhook is registrable over an open HTTP endpoint, an unvalidated
-        // URL is an SSRF: an agent holding a room code could point the room at
-        // `http://169.254.169.254/...` and have the server POST chat content
-        // to it. The check has to happen before the write, not at delivery.
+        // Validate the destination before storing it for server-side delivery.
         const check = validateWebhookUrl(str(p.url));
-        if (!check.ok) {
+        if (check.ok === false) {
           throw new RemoteRoomApiError(`Refusing that webhook URL: ${check.reason}`, 400, 'bad_request');
         }
         const webhook = await registerRoomWebhook(store, code, {
@@ -287,41 +259,44 @@ async function dispatchAction(store: UpstashClient, p: Record<string, unknown>):
           registeredBy: str(p.requesterName),
           ...(typeof p.secret === 'string' && p.secret ? { secret: p.secret } : {}),
         });
-        return { webhook };
+        const { secret: _secret, ...publicWebhook } = webhook;
+        return { webhook: publicWebhook };
       }
       case 'webhookList':
-        return { webhooks: await listRoomWebhooks(store, code) };
-      case 'webhookDelete':
-        // Deliberate parity gap, documented rather than papered over: the
-        // hosted server checks the requester before unregistering, this
-        // repo's unregisterRoomWebhook takes no requester at all. Registering
-        // already requires being a participant, so the exposure is "one
-        // participant can drop another's webhook in a room they are both in",
-        // not "anyone with the code can". Left as-is instead of inventing a
-        // check the web app does not apply either.
-        return { removed: await unregisterRoomWebhook(store, code, str(p.id)) };
+        return { webhooks: (await listRoomWebhooks(store, code)).map(({ secret: _secret, ...hook }) => hook) };
+      case 'webhookDelete': {
+        return { removed: await unregisterRoomWebhook(store, code, str(p.id), str(p.requesterName)) };
+      }
 
       // ── host / moderator controls ───────────────────────────────────────
       case 'setReplyMode': {
-        await assertHostFor(store, code, str(p.requesterName), p.hostKey as string | undefined);
+        const hostRoom = await assertHostFor(store, code, str(p.hostKey));
         const room = await setReplyMode(
-          store, code, str(p.requesterName),
+          store, code, hostRoom.createdBy,
           p.mode as Parameters<typeof setReplyMode>[3],
           p.config as Parameters<typeof setReplyMode>[4],
         );
         return { room };
       }
       case 'directInvoke': {
-        await assertHostFor(store, code, str(p.requesterName), p.hostKey as string | undefined);
-        const target = p.target as { name?: string } | undefined;
         const source = p.source === 'moderator' ? 'moderator' : 'host';
+        if (source === 'moderator') {
+          const room = await storeGetRoom(store, code);
+          const seat = findSeat(room, 'cc', p.seatKey);
+          if (!seat || seat.canSpeak === false || room.replyMode !== 'moderator' || !isConfiguredModerator(room, seat.name, 'cc')) {
+            throw new RemoteRoomApiError('Only the seated moderator can direct this turn.', 403, 'NotHostError');
+          }
+        } else {
+          await assertHostFor(store, code, str(p.hostKey));
+        }
+        const target = p.target as { name?: string } | undefined;
         const state = await getTurnState(store, code);
         const next = addHostDirected(state ?? { queue: [], startedAt: Date.now() } as never, str(target?.name), 'cc', source);
         await setTurnState(store, code, next);
         return { added: true };
       }
       case 'skipCurrent': {
-        await assertHostFor(store, code, str(p.requesterName), p.hostKey as string | undefined);
+        await assertHostFor(store, code, str(p.hostKey));
         const state = await getTurnState(store, code);
         if (!state) return { skipped: null };
         const next = skipQueueHead(state);
@@ -345,21 +320,19 @@ async function dispatchAction(store: UpstashClient, p: Record<string, unknown>):
   }
 }
 
-/** Shared by the admin actions; see assertHost below for why this exists. */
-async function assertHostFor(
-  store: UpstashClient,
-  code: string,
-  requesterName: string,
-  hostKey: string | undefined,
-): Promise<void> {
+export async function assertHostFor(
+  store: UpstashClient, code: string, hostKey: string | undefined,
+): Promise<Room> {
   const room = await storeGetRoom(store, code);
-  if (hostKey && await verifyHostKey(store, code, hostKey)) return;
-  if (requesterName === room.createdBy) return;
-  throw new RemoteRoomApiError(
-    `Only the host (${room.createdBy}) can do this. Pass the hostKey you got from room_create.`,
-    403,
-    'NotHostError',
-  );
+  if (hostKey && room.hostKeyHash) {
+    try {
+      await verifyHostKey(store, code, hostKey);
+      return room;
+    } catch (error) {
+      if (!(error instanceof HostNameTakenError)) throw error;
+    }
+  }
+  throw new RemoteRoomApiError('A valid room host key is required.', 403, 'NotHostError');
 }
 
 /**
@@ -396,8 +369,9 @@ export async function createRoom(
   for (let attempt = 0; attempt < 3; attempt++) {
     const code = generateCode();
     try {
-      return await storeCreateRoom(client.store, { code, topic: input.topic, createdBy: input.createdBy });
+      return await storeCreateRoom(client.store, { code, topic: input.topic, createdBy: input.createdBy, requireUnusedCode: true });
     } catch (e) {
+      if (!(e instanceof RoomCodeTakenError)) return translate(e);
       lastError = e;
     }
   }
@@ -450,6 +424,7 @@ export async function joinRoom(
     const result = await storeJoinRoom(client.store, code, participant, {
       ...(options.hostKey ? { hostKey: options.hostKey } : {}),
       ...(options.seatKey ? { seatKey: options.seatKey } : {}),
+      requireSeatProof: true,
       priorIdentity: { name: participant.name, client: 'cc' as const },
     });
     // A joining agent may be the reviewer a solo submission was waiting for,
@@ -508,40 +483,14 @@ export async function removeParticipant(
   return guarded(() => storeRemoveParticipant(client.store, code, requesterName, targetName, 'cc'));
 }
 
-/**
- * Ending and reviving are host-only, and the check lives HERE.
- *
- * upstash-client's endRoom/reactivateRoom take no requester at all — in this
- * repo the browser is trusted, because the person clicking already holds the
- * host key in their own session. An MCP caller is not that: the room code
- * alone reaches this endpoint, so without a check any agent that knows a code
- * could end someone else's meeting. The hosted server does this check in
- * `api/room.ts`; with no server here it has to be done at this seam.
- */
-async function assertHost(
-  client: RemoteRoomClient,
-  code: string,
-  requesterName: string,
-  hostKey: string | undefined,
-): Promise<void> {
-  const room = await storeGetRoom(client.store, code);
-  if (hostKey && await verifyHostKey(client.store, code, hostKey)) return;
-  if (requesterName === room.createdBy) return;
-  throw new RemoteRoomApiError(
-    `Only the host (${room.createdBy}) can do this. Pass the hostKey you got from room_create.`,
-    403,
-    'NotHostError',
-  );
-}
-
 export async function endRoom(
   client: RemoteRoomClient,
   code: string,
-  requesterName: string,
+  _requesterName: string,
   hostKey: string | undefined,
 ): Promise<Room> {
   return guarded(async () => {
-    await assertHost(client, code, requesterName, hostKey);
+    await assertHostFor(client.store, code, hostKey);
     return storeEndRoom(client.store, code);
   });
 }
@@ -549,11 +498,11 @@ export async function endRoom(
 export async function reactivateRoom(
   client: RemoteRoomClient,
   code: string,
-  requesterName: string,
+  _requesterName: string,
   hostKey: string | undefined,
 ): Promise<Room> {
   return guarded(async () => {
-    await assertHost(client, code, requesterName, hostKey);
+    await assertHostFor(client.store, code, hostKey);
     return storeReactivateRoom(client.store, code);
   });
 }
