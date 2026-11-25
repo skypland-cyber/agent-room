@@ -34,7 +34,7 @@ export function authenticateMcp(header: unknown, config: string | undefined) {
   const token = typeof header === 'string' ? /^Bearer ([A-Za-z0-9_-]{32,256})$/i.exec(header)?.[1] : undefined;
   if (!token) return null;
   const id = digest(token);
-  if (!Object.hasOwn(grants, id)) return null;
+  if (!Object.prototype.hasOwnProperty.call(grants, id)) return null;
   const grant = (grants as Record<string, McpGrant>)[id];
   if (!grant || (grant.rooms !== '*' && (!Array.isArray(grant.rooms) ||
       grant.rooms.some(code => typeof code !== 'string' || !isValidCode(code)))) ||

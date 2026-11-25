@@ -37,7 +37,7 @@ import {
   vaultDownloadPath,
   VaultRequestError,
 } from './_vault.js';
-import { createBlobStore, vaultStorageKey } from './_blobStore.js';
+import { blobStoreFailed, createBlobStore, vaultStorageKey } from './_blobStore.js';
 import { audit } from './_office.js';
 
 export const config = { api: { bodyParser: false }, maxDuration: 60 };
@@ -116,7 +116,7 @@ async function handleDownload(req: VercelRequest, res: VercelResponse): Promise<
     return;
   }
   const blob = createBlobStore();
-  if (!blob.ok) {
+  if (blobStoreFailed(blob)) {
     res.status(503).json({ error: 'storage_unavailable', message: blob.message });
     return;
   }
@@ -178,7 +178,7 @@ async function handleMultipartUpload(req: VercelRequest, res: VercelResponse): P
     return;
   }
   const blob = createBlobStore();
-  if (!blob.ok) {
+  if (blobStoreFailed(blob)) {
     res.status(503).json({ error: 'storage_unavailable', message: blob.message });
     return;
   }
@@ -381,7 +381,7 @@ async function handleAction(body: Record<string, unknown>, req: VercelRequest, r
         return;
       }
       const blob = createBlobStore();
-      if (!blob.ok) {
+      if (blobStoreFailed(blob)) {
         res.status(503).json({ error: 'storage_unavailable', message: blob.message });
         return;
       }
@@ -411,7 +411,7 @@ async function handleAction(body: Record<string, unknown>, req: VercelRequest, r
       // browser to the object store; the record is created only after the
       // server has seen the object.
       const blob = createBlobStore();
-      if (!blob.ok) {
+      if (blobStoreFailed(blob)) {
         res.status(503).json({ error: 'storage_unavailable', message: blob.message });
         return;
       }
@@ -442,7 +442,7 @@ async function handleAction(body: Record<string, unknown>, req: VercelRequest, r
     }
     case 'complete': {
       const blob = createBlobStore();
-      if (!blob.ok) {
+      if (blobStoreFailed(blob)) {
         res.status(503).json({ error: 'storage_unavailable', message: blob.message });
         return;
       }

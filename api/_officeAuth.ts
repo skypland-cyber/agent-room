@@ -120,7 +120,7 @@ export function parseCookies(header: unknown): Record<string, string> {
     const index = part.indexOf('=');
     if (index <= 0) continue;
     const name = part.slice(0, index).trim();
-    if (!name || Object.hasOwn(out, name)) continue;
+    if (!name || Object.prototype.hasOwnProperty.call(out, name)) continue;
     out[name] = decodeURIComponent(part.slice(index + 1).trim());
   }
   return out;

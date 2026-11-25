@@ -36,7 +36,7 @@ import {
   vaultUsage,
 } from '@agent-room/upstash-client';
 import { createRemoteRoomClient, type RemoteRoomClient } from './_mcpRoomClient.js';
-import { createBlobStore } from './_blobStore.js';
+import { blobStoreFailed, createBlobStore } from './_blobStore.js';
 import { siteUrl } from './_siteUrl.js';
 import { canDeleteFile } from './_fileAccess.js';
 import {
@@ -205,7 +205,7 @@ export async function runVaultTool(
           + `${siteUrl()}/api/files`);
       }
       const blob = createBlobStore();
-      if (!blob.ok) return fail('storage_unavailable', blob.message);
+      if (blobStoreFailed(blob)) return fail('storage_unavailable', blob.message);
       try {
         const uploaded = await uploadVaultFiles({ store: client.store, blob: blob.store }, {
           code,
@@ -253,7 +253,7 @@ export async function runVaultTool(
             return fail('file_too_large', `${formatVaultBytes(bytes.length)} exceeds the ${formatVaultBytes(VAULT_MCP_INLINE_MAX_BYTES)} tool-argument limit.`);
           }
           const blob = createBlobStore();
-          if (!blob.ok) return fail('storage_unavailable', blob.message);
+          if (blobStoreFailed(blob)) return fail('storage_unavailable', blob.message);
           const revised = await reviseVaultFile({ store: client.store, blob: blob.store }, {
             code,
             principal,
@@ -303,7 +303,7 @@ export async function runVaultTool(
         return fail('delete_forbidden', 'Only the uploader, the producer or the host can delete this file. Ask the host to remove it.');
       }
       const blob = createBlobStore();
-      if (!blob.ok) return fail('storage_unavailable', blob.message);
+      if (blobStoreFailed(blob)) return fail('storage_unavailable', blob.message);
       await deleteVaultFileWithObjects({ store: client.store, blob: blob.store }, code, file.kind, file.id);
       return result({ deleted: true, id: file.id, name: file.name });
     }

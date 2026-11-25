@@ -73,9 +73,24 @@ function readR2Env(env: NodeJS.ProcessEnv): R2Env | { missing: string[] } {
   };
 }
 
-export type BlobStoreResult =
-  | { ok: true; store: BlobStore }
-  | { ok: false; missing: string[]; message: string };
+export type BlobStoreSuccess = { ok: true; store: BlobStore };
+
+export type BlobStoreFailure = { ok: false; missing: string[]; message: string };
+
+export type BlobStoreResult = BlobStoreSuccess | BlobStoreFailure;
+
+/**
+ * Narrow a lookup result to its failure branch.
+ *
+ * A plain `if (!result.ok)` narrows this union only while `strictNullChecks` is
+ * on. Vercel compiles the API functions without it, so a call site that reads
+ * `result.message` after a bare truthiness check fails there even though the
+ * project's own `tsc` accepts it. The predicate narrows the same way under
+ * either setting.
+ */
+export function blobStoreFailed(result: BlobStoreResult): result is BlobStoreFailure {
+  return result.ok === false;
+}
 
 // The S3 client builds a credential provider chain on construction, which is
 // slow and pointless per request; one client per lambda warm start is right.
