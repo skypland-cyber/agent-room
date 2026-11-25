@@ -211,6 +211,7 @@ export async function readHeartbeat(client: UpstashClient, name: string): Promis
 }
 
 export async function listHeartbeats(client: UpstashClient, names: string[]): Promise<Record<string, AgentHeartbeat>> {
+  if (names.length === 0) return {};
   const rows = await Promise.all(names.map(name => readHeartbeat(client, name)));
   const out: Record<string, AgentHeartbeat> = {};
   names.forEach((name, index) => {
@@ -710,6 +711,9 @@ export async function bumpAgentTask(client: UpstashClient, day: string, agentId:
 }
 
 export async function readAgentUsage(client: UpstashClient, day: string, agentIds: string[]): Promise<Record<string, number>> {
+  // An office with no staff (or a caller asking about nobody) is the normal
+  // state of a fresh dashboard, so it must not cost a round trip.
+  if (agentIds.length === 0) return {};
   const rows = await client.pipeline<string | null>(agentIds.map(id => ['GET', officeAgentUsageKey(day, id)]));
   const out: Record<string, number> = {};
   agentIds.forEach((id, index) => {

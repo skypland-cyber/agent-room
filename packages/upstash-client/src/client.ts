@@ -50,6 +50,11 @@ export function createClient(env: UpstashEnv): UpstashClient {
       return out.result;
     },
     async pipeline<T>(cmds: readonly (readonly (string | number)[])[]): Promise<T[]> {
+      // Upstash answers an empty /pipeline body with HTTP 400, which we would
+      // surface as a storage outage. Callers derive their command lists from
+      // data ("one GET per agent", "one GET per id") and an empty list is a
+      // legitimate answer — no work, no request, empty result.
+      if (cmds.length === 0) return [];
       const out = (await post('/pipeline', cmds)) as Array<{ result: T }>;
       return out.map(x => x.result);
     },

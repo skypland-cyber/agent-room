@@ -26,6 +26,7 @@ import {
   listTemplates,
   mutateProject,
   readAudit,
+  readAgentUsage,
   readHeartbeat,
   readUsage,
   recordAgentHeartbeat,
@@ -193,6 +194,21 @@ describe('usage and capacity', () => {
   it('never blocks when the limit is zero (meaning unlimited)', async () => {
     const agent = await upsertAgent(client, { name: 'Qwen', role: 'x', dailyTaskLimit: 0 }, 'owner', now);
     expect(await agentCapacity(client, kstDay(now), agent)).toMatchObject({ ok: true });
+  });
+});
+
+describe('empty inputs', () => {
+  it('answers for an office with no staff without a round trip', async () => {
+    // A fresh office has no agents, so every
+    // "one command per agent id" list is empty. Upstash rejects an empty
+    // /pipeline with 400, which the dashboard used to see as a 503.
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await readAgentUsage(client, kstDay(now), [])).toEqual({});
+    expect(await listHeartbeats(client, [])).toEqual({});
+    expect(await client.pipeline([])).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

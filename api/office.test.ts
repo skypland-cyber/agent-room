@@ -123,6 +123,22 @@ describe('sign-in', () => {
   });
 });
 
+describe('an office with no AI staff yet', () => {
+  it('loads the dashboard and usage instead of reporting storage_unavailable', async () => {
+    // The regression: with zero agents every per-agent list is empty, and an
+    // empty /pipeline comes back 400 from Upstash as if the store were down.
+    const cookie = await signIn();
+    const overview = await call('overview', {}, cookie);
+    expect(overview.statusCode).toBe(200);
+    expect(overview.jsonBody.overview.agents).toEqual([]);
+
+    const usage = await call('usage.get', {}, cookie);
+    expect(usage.statusCode).toBe(200);
+    expect(usage.jsonBody.agents).toEqual([]);
+    expect(usage.jsonBody.requests).toBeGreaterThan(0);
+  });
+});
+
 describe('staff, projects and settings', () => {
   it('registers an AI employee, pauses it, and audits each change', async () => {
     const cookie = await signIn();
