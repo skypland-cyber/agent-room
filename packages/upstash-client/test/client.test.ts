@@ -57,4 +57,16 @@ describe('createClient', () => {
       ['LTRIM', 'key', -5, -1],
     ]);
   });
+
+  it('returns an empty result for an empty pipeline without calling Upstash', async () => {
+    // POST /pipeline with [] is a 400 from the REST API, which upstream reads
+    // as "storage unavailable". A list derived from data can legitimately be
+    // empty, so the client answers it locally.
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = createClient(ENV);
+    await expect(client.pipeline([])).resolves.toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

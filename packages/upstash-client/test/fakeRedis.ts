@@ -168,6 +168,15 @@ export function installFakeRedis(): FakeRedis {
   };
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: { body: string }) => {
     const body = JSON.parse(init.body);
+    // The real REST API answers an empty /pipeline body with HTTP 400, which
+    // the client would report as a storage outage. Modelling that here keeps
+    // "a list that happens to be empty" from silently passing tests while it
+    // fails in production (the 503 on a dashboard with no AI staff yet).
+    if (String(url).endsWith('/pipeline') && (body as unknown[][]).length === 0) {
+      return new Response(JSON.stringify({ error: 'invalid pipeline: no commands' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' },
+      });
+    }
     try {
       const result = String(url).endsWith('/pipeline')
         ? (body as unknown[][]).map(c => ({ result: exec(c) }))
