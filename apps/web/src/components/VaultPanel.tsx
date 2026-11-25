@@ -231,7 +231,6 @@ export function VaultPanel({ code, me, isHost, ended, taskFilter, onClearTaskFil
               {kind === 'material' ? t('vault.materialHint') : t('vault.deliverableHint')}
             </div>
           </div>
-          <LanguageToggle />
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
@@ -347,6 +346,9 @@ export function VaultPanel({ code, me, isHost, ended, taskFilter, onClearTaskFil
               {t('vault.folder.new')}
             </button>
           ))}
+          {/* The shelf is used inside a room, away from the office header, so
+              the language switch travels with it rather than living only there. */}
+          <LanguageToggle className="ml-auto" />
         </div>
       </div>
 
