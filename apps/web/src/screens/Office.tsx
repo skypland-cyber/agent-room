@@ -4,10 +4,15 @@
 // what to set), the boss is not signed in (one field), or the office is open.
 // The dashboard itself is deliberately quiet: a floor plan, four counts, and
 // tabs for the things that need a decision.
+//
+// Every sentence comes from the dictionary (default 한국어). The tab strip, the
+// sign-in card and the setup instructions are the three places a first-time
+// visitor meets the office, so none of them may fall back to English.
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { OfficeOverview, OfficeTemplate } from '@agent-room/shared';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
+import { LanguageToggle } from '../components/LanguageToggle.js';
 import { PixelOffice } from '../components/office/pixel/PixelOffice.js';
 import { OfficeStaffPanel } from '../components/office/OfficeStaffPanel.js';
 import { OfficeProjectsPanel } from '../components/office/OfficeProjectsPanel.js';
@@ -17,26 +22,29 @@ import { OfficeAutomationPanel } from '../components/office/OfficeAutomationPane
 import { OfficeSettingsPanel } from '../components/office/OfficeSettingsPanel.js';
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, SectionTitle, formatDate, timeAgo, useVisibleInterval } from '../components/office/ui.js';
 import { listTemplates, officeLogin, officeLogout, officeOverview, officeStatus, type OfficeStatus } from '../lib/officeApi.js';
+import { errorText, setupStepsText, warningText } from '../i18n/errors.js';
+import { useI18n, type MessageKey } from '../i18n/index.js';
 
 type TabKey = 'floor' | 'work' | 'staff' | 'projects' | 'record' | 'recurring' | 'limits';
 
-const TABS: Array<{ key: TabKey; label: string; badge?: (overview: OfficeOverview) => number }> = [
-  { key: 'floor', label: 'Floor' },
-  { key: 'work', label: 'Work', badge: overview => overview.counts.pendingApproval },
-  { key: 'staff', label: 'AI staff' },
-  { key: 'projects', label: 'Projects' },
-  { key: 'record', label: 'Minutes & log' },
-  { key: 'recurring', label: 'Recurring work' },
-  { key: 'limits', label: 'Limits & backup' },
+const TABS: Array<{ key: TabKey; labelKey: MessageKey; badge?: (overview: OfficeOverview) => number }> = [
+  { key: 'floor', labelKey: 'office.tab.floor' },
+  { key: 'work', labelKey: 'office.tab.work', badge: overview => overview.counts.pendingApproval },
+  { key: 'staff', labelKey: 'office.tab.staff' },
+  { key: 'projects', labelKey: 'office.tab.projects' },
+  { key: 'record', labelKey: 'office.tab.record' },
+  { key: 'recurring', labelKey: 'office.tab.recurring' },
+  { key: 'limits', labelKey: 'office.tab.limits' },
 ];
 
 export function Office() {
+  const { t } = useI18n();
   const [status, setStatus] = useState<OfficeStatus | null>(null);
   const [overview, setOverview] = useState<OfficeOverview | null>(null);
   const [tab, setTab] = useState<TabKey>('floor');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [selectedAgent, setSelectedAgent] = useState<string | undefined>();
   const [lastRefresh, setLastRefresh] = useState<number | null>(null);
   const [templates, setTemplates] = useState<OfficeTemplate[] | null>(null);
@@ -57,7 +65,7 @@ export function Office() {
       else { setOverview(null); }
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'The office could not be reached.');
+      setError(cause);
     } finally {
       setBusy(false);
     }
@@ -84,7 +92,7 @@ export function Office() {
       setPassword('');
       await refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Sign-in failed.');
+      setError(cause);
     } finally {
       setBusy(false);
     }
@@ -101,7 +109,7 @@ export function Office() {
     try {
       await loadOverview();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Reloading the office failed.');
+      setError(cause);
     }
   }, [loadOverview]);
 
@@ -109,23 +117,24 @@ export function Office() {
     <header className="sticky top-0 z-20 border-b border-border bg-white/95 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
         <div className="flex items-center gap-3">
-          <Link to="/" className="hover:opacity-85" aria-label="Agent Room home">
+          <Link to="/" className="hover:opacity-85" aria-label={t('office.home.aria')}>
             <AgentRoomLogo markClassName="h-7 w-7" wordmarkClassName="text-lg" />
           </Link>
           <span className="hidden h-5 w-px bg-border sm:block" />
           <div className="hidden sm:block">
-            <p className="text-sm font-semibold tracking-tight text-ink">AI office</p>
-            <p className="text-[11px] text-ink-faint">Staff, projects and the work above the rooms</p>
+            <p className="text-sm font-semibold tracking-tight text-ink">{t('office.brand.title')}</p>
+            <p className="text-[11px] text-ink-faint">{t('office.brand.subtitle')}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           {overview ? (
             <span className="hidden text-[11px] text-ink-faint sm:inline">
-              {lastRefresh ? `updated ${timeAgo(lastRefresh)}` : ''}
+              {lastRefresh ? t('office.header.updated', { time: timeAgo(lastRefresh) }) : ''}
             </span>
           ) : null}
-          <Link to="/new"><Button variant="ghost">Open a room</Button></Link>
-          {status?.authenticated ? <Button variant="quiet" onClick={() => void signOut()}>Sign out</Button> : null}
+          <LanguageToggle />
+          <Link to="/new"><Button variant="ghost">{t('office.header.openRoom')}</Button></Link>
+          {status?.authenticated ? <Button variant="quiet" onClick={() => void signOut()}>{t('office.header.signOut')}</Button> : null}
         </div>
       </div>
       {status?.authenticated && overview ? (
@@ -141,7 +150,7 @@ export function Office() {
                   tab === item.key ? 'border-ink text-ink' : 'border-transparent text-ink-soft hover:text-ink'
                 }`}
               >
-                {item.label}
+                {t(item.labelKey)}
                 {badge > 0 ? (
                   <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800">{badge}</span>
                 ) : null}
@@ -159,10 +168,10 @@ export function Office() {
         {header}
         <main className="mx-auto max-w-md px-4 py-16">
           <Card>
-            <SectionTitle title="Connecting to the office" />
-            <ErrorNote error={error} />
-            {!error ? <p className="text-xs text-ink-soft">Reading the office configuration…</p> : (
-              <Button onClick={() => void refresh()} disabled={busy}>Retry</Button>
+            <SectionTitle title={t('office.connecting.title')} />
+            <ErrorNote error={errorText(error)} />
+            {!error ? <p className="text-xs text-ink-soft">{t('office.connecting.reading')}</p> : (
+              <Button onClick={() => void refresh()} disabled={busy}>{t('common.retry')}</Button>
             )}
           </Card>
         </main>
@@ -171,17 +180,18 @@ export function Office() {
   }
 
   if (status.needsSetup) {
+    const steps = setupStepsText(status.setup?.steps ?? [], 12);
     return (
       <div className="min-h-full bg-surface-sunken">
         {header}
         <main className="mx-auto max-w-2xl px-4 py-12">
           <Card>
             <SectionTitle
-              title="Set the office password first"
-              hint="The office holds staff, approvals and every meeting's minutes, so it stays locked until this deployment has an ADMIN_PASSWORD."
+              title={t('office.setup.title')}
+              hint={t('office.setup.hint')}
             />
             <ol className="grid gap-2 text-xs leading-relaxed text-ink-muted">
-              {(status.setup?.steps ?? []).map((step, index) => (
+              {steps.map((step, index) => (
                 <li key={step} className="flex gap-2">
                   <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-surface-sunken text-[10px] font-bold text-ink-muted">{index + 1}</span>
                   <span>{step}</span>
@@ -192,14 +202,13 @@ export function Office() {
               <code className="font-mono text-[11px] text-emerald-300">ADMIN_PASSWORD=$(openssl rand -base64 36)</code>
             </div>
             <p className="mt-3 text-[11px] leading-relaxed text-ink-faint">
-              Until it is set, every office API answers <code className="font-mono">admin_not_configured</code> and no session can be created.
-              Rooms, the MCP endpoint and the file vault keep working exactly as before.
+              {t('office.setup.footnote')}
             </p>
             <div className="mt-4 flex gap-2">
-              <Button onClick={() => void refresh()} disabled={busy}>{busy ? 'Checking…' : 'I set it — check again'}</Button>
-              <Link to="/"><Button variant="ghost">Back to rooms</Button></Link>
+              <Button onClick={() => void refresh()} disabled={busy}>{busy ? t('office.setup.checking') : t('office.setup.checkAgain')}</Button>
+              <Link to="/"><Button variant="ghost">{t('office.setup.backToRooms')}</Button></Link>
             </div>
-            <ErrorNote error={error} />
+            <ErrorNote error={errorText(error)} />
           </Card>
         </main>
       </div>
@@ -212,22 +221,22 @@ export function Office() {
         {header}
         <main className="mx-auto max-w-md px-4 py-16">
           <Card>
-            <SectionTitle title="Sign in" hint="One password for the boss's office. It is the ADMIN_PASSWORD of this deployment." />
+            <SectionTitle title={t('office.login.title')} hint={t('office.login.hint')} />
             <form className="grid gap-3" onSubmit={event => { event.preventDefault(); void signIn(); }}>
-              <Field label="Office password">
+              <Field label={t('office.login.field')}>
                 <Input type="password" value={password} onChange={event => setPassword(event.target.value)}
                   autoFocus autoComplete="current-password" placeholder="••••••••••••" />
               </Field>
-              <Button type="submit" disabled={busy || !password}>{busy ? 'Signing in…' : 'Enter the office'}</Button>
-              <ErrorNote error={error} />
+              <Button type="submit" disabled={busy || !password}>{busy ? t('office.login.submitting') : t('office.login.submit')}</Button>
+              <ErrorNote error={errorText(error)} />
             </form>
             {status.weakPassword ? (
               <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-                This password is shorter than 12 characters. Replace it with a generated one; the office is only as private as this string.
+                {t('office.login.weak')}
               </p>
             ) : null}
             <p className="mt-3 text-[11px] leading-relaxed text-ink-faint">
-              Sessions last 12 hours and are signed with a key derived from the password — changing the password signs everyone out.
+              {t('office.login.sessionNote')}
             </p>
           </Card>
         </main>
@@ -239,9 +248,9 @@ export function Office() {
     <div className="min-h-full bg-surface-sunken">
       {header}
       <main className="mx-auto grid max-w-7xl gap-5 px-4 py-6 sm:px-6">
-        <ErrorNote error={error} />
+        <ErrorNote error={errorText(error)} />
         {!overview ? (
-          <Card><Empty>{busy ? 'Loading the office…' : 'No data yet.'}</Empty></Card>
+          <Card><Empty>{busy ? t('office.loading.office') : t('office.empty.noData')}</Empty></Card>
         ) : tab === 'floor' ? (
           <FloorTab
             overview={overview}
@@ -264,7 +273,7 @@ export function Office() {
               templates={templates}
               onChanged={() => { void onChanged(); void listTemplates().then(setTemplates).catch(() => undefined); }}
             />
-          ) : <Card><Empty>Loading templates…</Empty></Card>
+          ) : <Card><Empty>{t('office.loading.templates')}</Empty></Card>
         ) : (
           <OfficeSettingsPanel overview={overview} onChanged={onChanged} />
         )}
@@ -280,12 +289,13 @@ function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onChanged }: 
   onAddStaff: () => void;
   onChanged: () => void | Promise<void>;
 }) {
+  const { t } = useI18n();
   const counts = overview.counts;
   const cards = [
-    { label: 'AI staff on duty', value: `${counts.onlineAgents}/${counts.agents}`, hint: 'heartbeat within 10 minutes' },
-    { label: 'Open tasks', value: String(counts.openTasks), hint: 'across every room' },
-    { label: 'Awaiting approval', value: String(counts.pendingApproval), hint: 'only you can release these' },
-    { label: 'Archived meetings', value: String(counts.archivedMeetings), hint: 'kept beyond the 24h room' },
+    { label: t('floor.stat.staff'), value: `${counts.onlineAgents}/${counts.agents}`, hint: t('floor.stat.staffHint') },
+    { label: t('floor.stat.openTasks'), value: String(counts.openTasks), hint: t('floor.stat.openTasksHint') },
+    { label: t('floor.stat.approvals'), value: String(counts.pendingApproval), hint: t('floor.stat.approvalsHint') },
+    { label: t('floor.stat.archives'), value: String(counts.archivedMeetings), hint: t('floor.stat.archivesHint') },
   ];
 
   return (
@@ -303,7 +313,7 @@ function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onChanged }: 
       {overview.warnings.length > 0 ? (
         <ul className="grid gap-1.5">
           {overview.warnings.map(warning => (
-            <li key={warning} className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900">{warning}</li>
+            <li key={warning} className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900">{warningText(warning)}</li>
           ))}
         </ul>
       ) : null}
@@ -317,8 +327,8 @@ function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onChanged }: 
       />
 
       <Card>
-        <SectionTitle title="Latest minutes" hint="Ended meetings, kept permanently." action={<Badge tone="info">{overview.counts.archivedMeetings}</Badge>} />
-        {overview.archives.length === 0 ? <Empty>No meetings archived yet.</Empty> : (
+        <SectionTitle title={t('floor.latest.title')} hint={t('floor.latest.hint')} action={<Badge tone="info">{overview.counts.archivedMeetings}</Badge>} />
+        {overview.archives.length === 0 ? <Empty>{t('floor.latest.empty')}</Empty> : (
           <ul className="grid gap-1.5 sm:grid-cols-2">
             {overview.archives.map(archive => (
               <li key={archive.id} className="rounded-lg border border-border-faint bg-white px-3 py-2">

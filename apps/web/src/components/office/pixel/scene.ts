@@ -15,6 +15,7 @@ import {
   meetingSeats,
   spotFor,
 } from './officeMap.js';
+import { t } from '../../../i18n/index.js';
 
 export type SceneZone = 'desk' | 'meeting' | 'ceo' | 'lounge' | 'pantry' | 'overflow';
 export type ScenePose = 'type' | 'stand' | 'sit' | 'coffee' | 'sleep';
@@ -94,7 +95,9 @@ export function planScenes(
         pose: 'stand',
         tile: spot,
         facing: 'up',
-        bubble: approval.length > 1 ? `! ${approval.length} approvals` : '! your call',
+        bubble: approval.length > 1
+          ? t('pixel.bubble.approvals', { count: approval.length })
+          : t('pixel.bubble.yourCall'),
         bubbleTone: 'warn',
         needsBoss: true,
         alpha: 1,
@@ -111,8 +114,8 @@ export function planScenes(
           tile: { x: desk.standX, y: desk.standY },
           facing: 'down',
           bubble: status === 'working'
-            ? (agent.presence.taskId ? `${agent.presence.taskId} typing…` : 'typing…')
-            : 'Zzz',
+            ? (agent.presence.taskId ? t('pixel.bubble.typingTask', { id: agent.presence.taskId }) : t('pixel.bubble.typing'))
+            : t('pixel.bubble.sleep'),
           bubbleTone: status === 'working' ? 'info' : 'muted',
           needsBoss: false,
           alpha: status === 'offline' ? 0.45 : 1,
@@ -127,7 +130,7 @@ export function planScenes(
         pose: status === 'working' ? 'stand' : 'sit',
         tile: spot,
         facing: 'down',
-        bubble: status === 'working' ? 'typing…' : 'Zzz',
+        bubble: status === 'working' ? t('pixel.bubble.typing') : t('pixel.bubble.sleep'),
         bubbleTone: 'muted',
         needsBoss: false,
         alpha: status === 'offline' ? 0.45 : 1,
@@ -145,7 +148,7 @@ export function planScenes(
         pose: 'sit',
         tile: spot,
         facing: 'down',
-        bubble: 'paused',
+        bubble: t('pixel.bubble.paused'),
         bubbleTone: 'muted',
         needsBoss: false,
         alpha: 1,
@@ -163,7 +166,9 @@ export function planScenes(
         pose: 'stand',
         tile,
         facing: 'down',
-        bubble: testBubble(agent.presence.taskId, 'reviewing'),
+        bubble: agent.presence.taskId
+          ? t('pixel.bubble.reviewTask', { id: agent.presence.taskId })
+          : t('pixel.bubble.reviewing'),
         bubbleTone: 'warn',
         needsBoss: false,
         alpha: 1,
@@ -180,17 +185,13 @@ export function planScenes(
       pose: 'coffee',
       tile: spot,
       facing: 'up',
-      bubble: 'free',
+      bubble: t('pixel.bubble.free'),
       bubbleTone: 'good',
       needsBoss: false,
       alpha: 1,
       deskIndex,
     };
   });
-}
-
-function testBubble(taskId: string | undefined, fallback: string): string {
-  return taskId ? `${taskId} review` : fallback;
 }
 
 /** A stable colour family for one agent: two staff never look the same. */

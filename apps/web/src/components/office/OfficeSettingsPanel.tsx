@@ -5,6 +5,8 @@ import { useState } from 'react';
 import type { OfficeOverview, OfficeSettings } from '@agent-room/shared';
 import { exportBackup, restoreBackup, saveSettings } from '../../lib/officeApi.js';
 import { Badge, Button, Card, ErrorNote, Field, Input, SectionTitle, useOfficeAction } from './ui.js';
+import { getLanguage, useI18n } from '../../i18n/index.js';
+import { message, usageNotesText } from '../../i18n/errors.js';
 
 interface Props {
   overview: OfficeOverview;
@@ -21,6 +23,7 @@ function Bar({ percent, level }: { percent: number; level: string }) {
 }
 
 export function OfficeSettingsPanel({ overview, onChanged }: Props) {
+  const { t } = useI18n();
   const [settings, setSettings] = useState<OfficeSettings>(overview.settings);
   const [includeBoards, setIncludeBoards] = useState(false);
   const [restoreText, setRestoreText] = useState('');
@@ -30,7 +33,7 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
 
   const save = () => void run('settings', async () => {
     await saveSettings(settings);
-    setNotice('Settings saved.');
+    setNotice(t('limits.rules.saved'));
   });
 
   const download = () => void run('export', async () => {
@@ -42,7 +45,7 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
     link.download = `agent-room-office-${new Date().toISOString().slice(0, 10)}.json`;
     link.click();
     URL.revokeObjectURL(url);
-    setNotice('Backup downloaded.');
+    setNotice(t('limits.backup.downloaded'));
   });
 
   const restore = () => void run('restore', async () => {
@@ -50,29 +53,30 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
     try {
       parsed = JSON.parse(restoreText);
     } catch {
-      throw new Error('That is not valid JSON. Paste the whole backup file.');
+      throw message('limits.backup.badJson');
     }
-    if (restoreMode === 'replace' && !window.confirm('Replace the whole office with this backup? Staff, projects, templates and archives are overwritten.')) return;
+    if (restoreMode === 'replace' && !window.confirm(t('limits.backup.replaceConfirm'))) return;
     const result = await restoreBackup(parsed, restoreMode);
-    setNotice(`Restored ${JSON.stringify(result.restored)}.`);
+    setNotice(t('limits.backup.restored', { summary: JSON.stringify(result.restored) }));
     setRestoreText('');
   });
 
   const usage = overview.usage;
+  const locale = getLanguage() === 'ko' ? 'ko-KR' : 'en-GB';
 
   return (
     <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
       <Card>
-        <SectionTitle title="Usage and limits" hint="Measured against the free tier: 10,000 Redis commands a day. The office counts its own requests." />
+        <SectionTitle title={t('limits.usage.title')} hint={t('limits.usage.hint')} />
         <div className="rounded-xl border border-border-faint bg-surface-soft p-3">
           <div className="flex items-center justify-between text-xs">
-            <span className="font-semibold text-ink">Office requests today ({usage.day})</span>
+            <span className="font-semibold text-ink">{t('limits.usage.today', { day: usage.day })}</span>
             <Badge tone={usage.requestLevel === 'critical' ? 'bad' : usage.requestLevel === 'warn' ? 'warn' : 'good'}>
-              {usage.requests.toLocaleString()} / {usage.requestBudget.toLocaleString()}
+              {usage.requests.toLocaleString(locale)} / {usage.requestBudget.toLocaleString(locale)}
             </Badge>
           </div>
           <Bar percent={usage.percent} level={usage.requestLevel} />
-          <p className="mt-1 text-[11px] text-ink-faint">{usage.writeRequests.toLocaleString()} of those were changes.</p>
+          <p className="mt-1 text-[11px] text-ink-faint">{t('limits.usage.writes', { count: usage.writeRequests.toLocaleString(locale) })}</p>
         </div>
 
         <ul className="mt-3 grid gap-2">
@@ -81,7 +85,7 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
               <div className="flex items-center justify-between text-[11px]">
                 <span className="font-semibold text-ink">{agent.name}</span>
                 <span className={agent.level === 'critical' ? 'text-rose-600' : 'text-ink-soft'}>
-                  {agent.tasksToday}/{agent.limit || '∞'} tasks
+                  {t('limits.usage.agentTasks', { used: agent.tasksToday, limit: agent.limit || '∞' })}
                 </span>
               </div>
               <Bar percent={agent.limit ? (agent.tasksToday / agent.limit) * 100 : 0} level={agent.level} />
@@ -89,35 +93,35 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
           ))}
         </ul>
         <ul className="mt-3 grid gap-1 text-[11px] leading-relaxed text-ink-faint">
-          {usage.notes.map(note => <li key={note}>· {note}</li>)}
+          {usageNotesText(usage.notes, usage.day).map(note => <li key={note}>· {note}</li>)}
         </ul>
 
         <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border-faint pt-3 text-[11px]">
-          <div><span className="text-ink-faint">Redis</span><p className="font-semibold text-ink">{overview.integrations.redis ? 'connected' : 'missing'}</p></div>
-          <div><span className="text-ink-faint">File storage</span><p className="font-semibold text-ink">{overview.integrations.storage ? 'connected' : 'not configured'}</p></div>
-          <div><span className="text-ink-faint">MCP grants</span><p className="font-semibold text-ink">{overview.integrations.mcpGrants}</p></div>
-          <div><span className="text-ink-faint">Admin password</span><p className="font-semibold text-ink">{overview.integrations.adminConfigured ? 'set' : 'not set'}</p></div>
+          <div><span className="text-ink-faint">{t('limits.integration.redis')}</span><p className="font-semibold text-ink">{overview.integrations.redis ? t('limits.integration.connected') : t('limits.integration.missing')}</p></div>
+          <div><span className="text-ink-faint">{t('limits.integration.storage')}</span><p className="font-semibold text-ink">{overview.integrations.storage ? t('limits.integration.connected') : t('limits.integration.notConfigured')}</p></div>
+          <div><span className="text-ink-faint">{t('limits.integration.mcp')}</span><p className="font-semibold text-ink">{overview.integrations.mcpGrants}</p></div>
+          <div><span className="text-ink-faint">{t('limits.integration.admin')}</span><p className="font-semibold text-ink">{overview.integrations.adminConfigured ? t('limits.integration.set') : t('limits.integration.notSet')}</p></div>
         </div>
       </Card>
 
       <div className="grid gap-5">
         <Card>
-          <SectionTitle title="Office rules" hint="Applied to every room this office runs." />
+          <SectionTitle title={t('limits.rules.title')} hint={t('limits.rules.hint')} />
           <form className="grid gap-3" onSubmit={event => { event.preventDefault(); save(); }}>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Daily request budget" hint="Free tier plans cap commands, not requests.">
+              <Field label={t('limits.rules.budget')} hint={t('limits.rules.budgetHint')}>
                 <Input type="number" min={100} value={settings.dailyRequestBudget}
                   onChange={event => setSettings({ ...settings, dailyRequestBudget: Number(event.target.value) })} />
               </Field>
-              <Field label="Warn at (%)">
+              <Field label={t('limits.rules.warn')}>
                 <Input type="number" min={10} max={100} value={Math.round(settings.warnRatio * 100)}
                   onChange={event => setSettings({ ...settings, warnRatio: Number(event.target.value) / 100 })} />
               </Field>
-              <Field label="Default daily tasks per agent">
+              <Field label={t('limits.rules.defaultLimit')}>
                 <Input type="number" min={0} max={500} value={settings.defaultAgentDailyLimit}
                   onChange={event => setSettings({ ...settings, defaultAgentDailyLimit: Number(event.target.value) })} />
               </Field>
-              <Field label="Auto-retries before takeover">
+              <Field label={t('limits.rules.autoRetry')}>
                 <Input type="number" min={0} max={10} value={settings.autoRetryLimit}
                   onChange={event => setSettings({ ...settings, autoRetryLimit: Number(event.target.value) })} />
               </Field>
@@ -125,15 +129,15 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
             <label className="flex items-center gap-2 text-xs text-ink-muted">
               <input type="checkbox" checked={settings.autoHandoff}
                 onChange={event => setSettings({ ...settings, autoHandoff: event.target.checked })} />
-              Hand failed work to a peer agent after the retries are spent
+              {t('limits.rules.autoHandoff')}
             </label>
             <label className="flex items-center gap-2 text-xs text-ink-muted">
               <input type="checkbox" checked={settings.requireQa}
                 onChange={event => setSettings({ ...settings, requireQa: event.target.checked })} />
-              Require a peer QA pass on completed work
+              {t('limits.rules.requireQa')}
             </label>
             <div className="flex items-center gap-2">
-              <Button type="submit" disabled={busy !== null}>Save rules</Button>
+              <Button type="submit" disabled={busy !== null}>{t('limits.rules.save')}</Button>
               {notice ? <span className="text-[11px] text-emerald-700">{notice}</span> : null}
             </div>
             <ErrorNote error={error} />
@@ -141,19 +145,19 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
         </Card>
 
         <Card>
-          <SectionTitle title="Backup and restore" hint="The office's own JSON: staff, projects, templates, archives, log and rules." />
+          <SectionTitle title={t('limits.backup.title')} hint={t('limits.backup.hint')} />
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={download} disabled={busy !== null}>Download backup</Button>
+            <Button onClick={download} disabled={busy !== null}>{t('limits.backup.download')}</Button>
             <label className="flex items-center gap-2 text-[11px] text-ink-muted">
               <input type="checkbox" checked={includeBoards} onChange={event => setIncludeBoards(event.target.checked)} />
-              Include room boards (read-only record)
+              {t('limits.backup.includeBoards')}
             </label>
           </div>
           <p className="mt-2 text-[11px] leading-relaxed text-ink-faint">
-            Restoring never rewrites a live room board: those belong to the room and the seats polling it.
+            {t('limits.backup.note')}
           </p>
           <div className="mt-3 grid gap-2 border-t border-border-faint pt-3">
-            <Field label="Restore from a backup file" hint="Paste the JSON, or use the download above to keep a copy.">
+            <Field label={t('limits.backup.restoreLabel')} hint={t('limits.backup.restoreHint')}>
               <textarea
                 value={restoreText}
                 onChange={event => setRestoreText(event.target.value)}
@@ -165,9 +169,9 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
               <label className="flex items-center gap-2 text-[11px] text-ink-muted">
                 <input type="checkbox" checked={restoreMode === 'replace'}
                   onChange={event => setRestoreMode(event.target.checked ? 'replace' : 'merge')} />
-                Replace everything (otherwise merge by id)
+                {t('limits.backup.replaceAll')}
               </label>
-              <Button variant="ghost" onClick={restore} disabled={busy !== null || !restoreText.trim()}>Restore</Button>
+              <Button variant="ghost" onClick={restore} disabled={busy !== null || !restoreText.trim()}>{t('limits.backup.restore')}</Button>
             </div>
           </div>
         </Card>

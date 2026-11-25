@@ -8,6 +8,8 @@ import { useState } from 'react';
 import type { OfficeAgent, OfficeAgentView } from '@agent-room/shared';
 import { deleteAgent, pauseAgent, saveAgent } from '../../lib/officeApi.js';
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, SectionTitle, TextArea, timeAgo, useOfficeAction } from './ui.js';
+import { useI18n } from '../../i18n/index.js';
+import { presenceLabel } from '../../i18n/labels.js';
 
 interface Props {
   agents: OfficeAgentView[];
@@ -23,6 +25,7 @@ const EMPTY_FORM = {
 };
 
 export function OfficeStaffPanel({ agents, onChanged }: Props) {
+  const { t } = useI18n();
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [editing, setEditing] = useState(false);
   const { busy, error, setError, run } = useOfficeAction(onChanged);
@@ -62,12 +65,12 @@ export function OfficeStaffPanel({ agents, onChanged }: Props) {
     <div className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
       <Card>
         <SectionTitle
-          title="AI staff"
-          hint="Each entry is an agent you can assign work to. Paused staff keep their seat but receive nothing new."
+          title={t('staff.title')}
+          hint={t('staff.hint')}
         />
         <ErrorNote error={error} />
         {agents.length === 0 ? (
-          <Empty>No AI staff yet. Add one on the right, then open a room and let it listen.</Empty>
+          <Empty>{t('staff.empty')}</Empty>
         ) : (
           <ul className="mt-3 divide-y divide-border-faint">
             {agents.map(agent => (
@@ -75,30 +78,30 @@ export function OfficeStaffPanel({ agents, onChanged }: Props) {
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-semibold text-ink">{agent.name}</span>
-                    <Badge tone={STATUS_TONE[agent.presence.status] ?? 'neutral'}>{agent.presence.label}</Badge>
-                    {agent.requiresApproval ? <Badge tone="warn">Approval needed</Badge> : null}
-                    {!agent.enabled ? <Badge tone="bad">Disabled</Badge> : null}
+                    <Badge tone={STATUS_TONE[agent.presence.status] ?? 'neutral'}>{presenceLabel(agent.presence, agent.enabled)}</Badge>
+                    {agent.requiresApproval ? <Badge tone="warn">{t('staff.badge.approval')}</Badge> : null}
+                    {!agent.enabled ? <Badge tone="bad">{t('staff.badge.disabled')}</Badge> : null}
                   </div>
                   <p className="mt-0.5 text-xs text-ink-muted">{agent.role}</p>
                   <p className="mt-1 text-[11px] text-ink-faint">
-                    {agent.tags.length ? `Tags: ${agent.tags.join(', ')} · ` : ''}
-                    Today {agent.tasksToday}/{agent.dailyTaskLimit} ·
-                    {' '}heartbeat {timeAgo(agent.presence.heartbeatAgeMs !== undefined ? Date.now() - agent.presence.heartbeatAgeMs : agent.lastHeartbeatAt)}
-                    {agent.presence.roomCode ? ` · room ${agent.presence.roomCode}` : ''}
+                    {agent.tags.length ? t('staff.meta.tags', { tags: agent.tags.join(', ') }) : ''}
+                    {t('staff.meta.today', { used: agent.tasksToday, limit: agent.dailyTaskLimit })}
+                    {t('staff.meta.heartbeat', { time: timeAgo(agent.presence.heartbeatAgeMs !== undefined ? Date.now() - agent.presence.heartbeatAgeMs : agent.lastHeartbeatAt) })}
+                    {agent.presence.roomCode ? t('staff.meta.room', { code: agent.presence.roomCode }) : ''}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
-                  <Button variant="ghost" onClick={() => startEdit(agent)}>Edit</Button>
+                  <Button variant="ghost" onClick={() => startEdit(agent)}>{t('staff.act.edit')}</Button>
                   <Button variant={agent.paused ? 'ghost' : 'quiet'} disabled={busy !== null}
                     onClick={() => void run(`pause-${agent.id}`, () => pauseAgent(agent.id, !agent.paused))}>
-                    {agent.paused ? 'Resume' : 'Pause'}
+                    {agent.paused ? t('staff.act.resume') : t('staff.act.pause')}
                   </Button>
                   <Button variant="danger" disabled={busy !== null}
                     onClick={() => {
-                      if (!window.confirm(`Remove ${agent.name} from the office? Their seat keys stay with the rooms.`)) return;
+                      if (!window.confirm(t('staff.remove.confirm', { name: agent.name }))) return;
                       void run(`delete-${agent.id}`, () => deleteAgent(agent.id));
                     }}>
-                    Remove
+                    {t('staff.act.remove')}
                   </Button>
                 </div>
               </li>
@@ -109,25 +112,25 @@ export function OfficeStaffPanel({ agents, onChanged }: Props) {
 
       <Card>
         <SectionTitle
-          title={editing ? 'Edit AI staff' : 'Add AI staff'}
-          hint="The name must match the name the agent uses when it joins a room."
-          action={editing ? <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...EMPTY_FORM }); }}>Cancel</Button> : undefined}
+          title={editing ? t('staff.form.editTitle') : t('staff.form.addTitle')}
+          hint={t('staff.form.hint')}
+          action={editing ? <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...EMPTY_FORM }); }}>{t('common.cancel')}</Button> : undefined}
         />
         <form
           className="grid gap-3"
           onSubmit={event => { event.preventDefault(); void submit(); }}
         >
-          <Field label="Name" hint="Exactly as the agent introduces itself, e.g. Qwen.">
+          <Field label={t('staff.form.name')} hint={t('staff.form.nameHint')}>
             <Input value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} required maxLength={80} placeholder="Qwen" />
           </Field>
-          <Field label="Role / speciality">
-            <Input value={form.role} onChange={event => setForm({ ...form, role: event.target.value })} required maxLength={120} placeholder="Korean copywriter" />
+          <Field label={t('staff.form.role')}>
+            <Input value={form.role} onChange={event => setForm({ ...form, role: event.target.value })} required maxLength={120} placeholder="한국어 카피라이터" />
           </Field>
-          <Field label="Tags" hint="Work it may be assigned, comma separated. Templates match on these.">
-            <Input value={form.tags} onChange={event => setForm({ ...form, tags: event.target.value })} placeholder="copy, ko, print" />
+          <Field label={t('staff.form.tags')} hint={t('staff.form.tagsHint')}>
+            <Input value={form.tags} onChange={event => setForm({ ...form, tags: event.target.value })} placeholder="카피, 한국어, 인쇄" />
           </Field>
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Daily task limit" hint="0 = unlimited.">
+            <Field label={t('staff.form.limit')} hint={t('staff.form.limitHint')}>
               <Input type="number" min={0} max={500} value={form.dailyTaskLimit}
                 onChange={event => setForm({ ...form, dailyTaskLimit: event.target.value })} />
             </Field>
@@ -135,25 +138,25 @@ export function OfficeStaffPanel({ agents, onChanged }: Props) {
               <label className="flex items-center gap-2 text-xs text-ink-muted">
                 <input type="checkbox" checked={form.requiresApproval}
                   onChange={event => setForm({ ...form, requiresApproval: event.target.checked })} />
-                Its work needs approval
+                {t('staff.form.needsApproval')}
               </label>
               <label className="flex items-center gap-2 text-xs text-ink-muted">
                 <input type="checkbox" checked={form.enabled}
                   onChange={event => setForm({ ...form, enabled: event.target.checked })} />
-                Enabled
+                {t('staff.form.enabled')}
               </label>
             </div>
           </div>
-          <Field label="Standing brief (optional)" hint="Handed to the agent with its assignments.">
-            <TextArea value={form.brief} onChange={event => setForm({ ...form, brief: event.target.value })} maxLength={4000} placeholder="Writes in Korean, always cites the source sheet." />
+          <Field label={t('staff.form.brief')} hint={t('staff.form.briefHint')}>
+            <TextArea value={form.brief} onChange={event => setForm({ ...form, brief: event.target.value })} maxLength={4000} placeholder="한국어로 쓰고, 항상 원본 시트를 인용한다." />
           </Field>
           {error ? <p className="text-[11px] text-rose-600">{error}</p> : null}
           <div className="flex items-center gap-2">
-            <Button type="submit" disabled={busy !== null}>{editing ? 'Save changes' : 'Add to the roster'}</Button>
-            {editing ? <span className="text-[11px] text-ink-faint">Editing {form.name}</span> : null}
+            <Button type="submit" disabled={busy !== null}>{editing ? t('staff.form.save') : t('staff.form.add')}</Button>
+            {editing ? <span className="text-[11px] text-ink-faint">{t('staff.form.editing', { name: form.name })}</span> : null}
           </div>
         </form>
-        {error && !editing ? <button type="button" className="mt-2 text-[11px] text-ink-faint underline" onClick={() => setError(null)}>dismiss</button> : null}
+        {error && !editing ? <button type="button" className="mt-2 text-[11px] text-ink-faint underline" onClick={() => setError(null)}>{t('common.dismiss')}</button> : null}
       </Card>
     </div>
   );

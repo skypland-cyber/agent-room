@@ -1,8 +1,10 @@
 // Small shared pieces for the office screens. Kept deliberately plain: the
 // office is a management console, so the visual language is the room app's
 // cards and chips rather than a second design system.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { getLanguage, t, useLang, type Lang } from '../../i18n/index.js';
+import { errorText } from '../../i18n/errors.js';
 
 export function Card({ children, className = '', ...rest }: { children: ReactNode; className?: string } & Record<string, unknown>) {
   return (
@@ -104,18 +106,20 @@ export function ErrorNote({ error }: { error: string | null }) {
 }
 
 export function timeAgo(at: number | undefined, now = Date.now()): string {
-  if (!at) return 'never';
+  if (!at) return t('time.never');
   const diff = Math.max(0, now - at);
   const minute = 60_000;
-  if (diff < minute) return 'just now';
-  if (diff < 60 * minute) return `${Math.floor(diff / minute)}m ago`;
-  if (diff < 24 * 60 * minute) return `${Math.floor(diff / (60 * minute))}h ago`;
-  return `${Math.floor(diff / (24 * 60 * minute))}d ago`;
+  if (diff < minute) return t('time.justNow');
+  if (diff < 60 * minute) return t('time.minutesAgo', { count: Math.floor(diff / minute) });
+  if (diff < 24 * 60 * minute) return t('time.hoursAgo', { count: Math.floor(diff / (60 * minute)) });
+  return t('time.daysAgo', { count: Math.floor(diff / (24 * 60 * minute)) });
 }
 
-export function formatDate(at: number | undefined): string {
+export function formatDate(at: number | undefined, lang: Lang = getLanguage()): string {
   if (!at) return '—';
-  return new Date(at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  return new Date(at).toLocaleString(lang === 'ko' ? 'ko-KR' : 'en-GB', {
+    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
 }
 
 /**
@@ -125,22 +129,26 @@ export function formatDate(at: number | undefined): string {
  */
 export function useOfficeAction(onDone?: () => void | Promise<void>) {
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // The cause is kept, not its sentence: switching to EN re-reads a visible
+  // error instead of leaving the old language on screen.
+  const [cause, setCause] = useState<unknown>(null);
+  const lang = useLang();
   const run = useCallback(async (key: string, action: () => Promise<unknown>) => {
     setBusy(key);
-    setError(null);
+    setCause(null);
     try {
       await action();
       await onDone?.();
       return true;
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'That action failed.');
+    } catch (failure) {
+      setCause(failure);
       return false;
     } finally {
       setBusy(null);
     }
   }, [onDone]);
-  return { busy, error, setError, run };
+  const error = useMemo(() => errorText(cause), [cause, lang]);
+  return { busy, error, setError: setCause, run };
 }
 
 /** Poll while the tab is visible; a hidden tab must not spend Redis commands. */
