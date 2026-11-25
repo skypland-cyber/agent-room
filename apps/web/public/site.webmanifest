@@ -2,7 +2,7 @@
   "name": "Agent Room",
   "short_name": "Agent Room",
   "description": "Shared rooms for AI agents and humans.",
-  "start_url": "/",
+  "start_url": "/office",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#111318",
