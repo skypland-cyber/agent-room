@@ -16,6 +16,8 @@ import {
   listBoardRooms,
   listMessages,
   archiveRoom,
+  bumpAgentTask,
+  findAgentByName,
   listAgents,
   listArchives,
   listHeartbeats,
@@ -344,8 +346,7 @@ export async function captureRoomArchive(
 export async function assertAgentCapacity(store: UpstashClient, name: string, now: number = Date.now()): Promise<void> {
   const trimmed = name?.trim();
   if (!trimmed) return;
-  const agents = await listAgents(store).catch(() => [] as OfficeAgent[]);
-  const agent = agents.find(item => item.name.trim().toLowerCase() === trimmed.toLowerCase());
+  const agent = await findAgentByName(store, trimmed).catch(() => null);
   if (!agent) return;
   const capacity = await agentCapacity(store, kstDay(now), agent);
   if (!capacity.ok) throw new OfficeApiError(capacity.reason ?? `${agent.name} cannot take more work today.`, 429, 'agent_daily_limit');
@@ -356,10 +357,11 @@ export async function noteAgentTask(store: UpstashClient, name: string, now: num
   const trimmed = name?.trim();
   if (!trimmed) return;
   try {
-    const agents = await listAgents(store);
-    const agent = agents.find(item => item.name.trim().toLowerCase() === trimmed.toLowerCase());
+    // Name index -> id, then one INCR: the write path must not walk the whole
+    // roster every time a task is created.
+    const agent = await findAgentByName(store, trimmed);
     if (!agent) return;
-    await store.command(['INCR', officeAgentUsageKey(kstDay(now), agent.id)]);
+    await bumpAgentTask(store, kstDay(now), agent.id);
   } catch { /* counters are advisory */ }
 }
 

@@ -237,8 +237,10 @@ export async function recordAgentHeartbeat(
   if (!name) return { recorded: false };
   const throttle = input.throttleMs ?? 30_000;
   const previous = await readHeartbeat(client, name);
+  // The common case is a listen loop inside the window: answer from the one
+  // read we already did instead of also looking the agent up.
+  if (previous && input.at - previous.at < throttle) return { recorded: false };
   const agent = await findAgentByName(client, name);
-  if (previous && input.at - previous.at < throttle) return { recorded: false, ...(agent ? { agentId: agent.id } : {}) };
   await writeJson(client, heartbeatKey(name), { at: input.at, ...(input.roomCode ? { roomCode: input.roomCode } : {}) });
   if (agent) {
     // Mirror the stamp onto the roster entry at heartbeat cadence, not on every
@@ -683,7 +685,9 @@ export async function readAudit(client: UpstashClient, limit = 200): Promise<Off
 
 export async function bumpUsage(client: UpstashClient, day: string, kind: 'requests' | 'writes'): Promise<number> {
   const value = Number(await client.command<number>(['INCR', officeUsageKey(day, kind)]));
-  await client.command(['EXPIRE', officeUsageKey(day, kind), String(60 * 60 * 24 * 3)]);
+  // The counter is read on every dashboard refresh, so the expiry is only set
+  // when the key is born: one command per request instead of two.
+  if (value === 1) await client.command(['EXPIRE', officeUsageKey(day, kind), String(60 * 60 * 24 * 3)]);
   return value;
 }
 
@@ -701,7 +705,7 @@ export async function readUsage(client: UpstashClient, day: string): Promise<{ r
 
 export async function bumpAgentTask(client: UpstashClient, day: string, agentId: string): Promise<number> {
   const value = Number(await client.command<number>(['INCR', officeAgentUsageKey(day, agentId)]));
-  await client.command(['EXPIRE', officeAgentUsageKey(day, agentId), String(60 * 60 * 24 * 3)]);
+  if (value === 1) await client.command(['EXPIRE', officeAgentUsageKey(day, agentId), String(60 * 60 * 24 * 3)]);
   return value;
 }
 
