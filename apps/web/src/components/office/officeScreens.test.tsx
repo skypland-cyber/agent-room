@@ -7,7 +7,8 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { OfficeAgentView, OfficeOverview } from '@agent-room/shared';
-import { Office2D } from './Office2D.js';
+import { PixelOffice } from './pixel/PixelOffice.js';
+import { OfficeAgentPanel } from './pixel/OfficeAgentPanel.js';
 import { OfficeStaffPanel } from './OfficeStaffPanel.js';
 import { OfficeProjectsPanel } from './OfficeProjectsPanel.js';
 import { OfficeWorkPanel } from './OfficeWorkPanel.js';
@@ -67,18 +68,35 @@ const overview = {
 } satisfies OfficeOverview;
 
 describe('office screens render', () => {
-  it('draws every status on the floor and names the desks', () => {
-    const html = renderToStaticMarkup(<Office2D agents={agents} pendingApprovals={1} />);
-    for (const name of ['Qwen', 'Pixel', 'GPT', 'Gemini', 'Codex']) expect(html).toContain(name);
-    expect(html).toContain('Review room');
-    expect(html).toContain('1 waiting for approval');
-    expect(html).toContain('Working');
-    expect(html).toContain('Offline');
+  it('renders the pixel floor with a canvas and the live staff count', () => {
+    const html = renderToStaticMarkup(
+      <PixelOffice overview={overview} onSelect={() => undefined} onAddStaff={() => undefined} onChanged={() => undefined} />,
+    );
+    expect(html).toContain('<canvas');
+    expect(html).toContain('The office floor');
+    expect(html).toContain('5 staff');
+    expect(html).toContain('1 working');
+    expect(html).toContain('1 offline');
+    expect(html).toContain('Fullscreen');
   });
 
   it('shows the empty office instead of a blank canvas', () => {
-    const html = renderToStaticMarkup(<Office2D agents={[]} pendingApprovals={0} />);
-    expect(html).toContain('No AI staff yet');
+    const html = renderToStaticMarkup(
+      <PixelOffice overview={{ ...overview, agents: [] }} selectedId={undefined} onSelect={() => undefined} onAddStaff={() => undefined} onChanged={() => undefined} />,
+    );
+    expect(html).toContain('The office is empty');
+    expect(html).toContain('Add AI staff');
+  });
+
+  it('opens a character sheet with its work, limits and order form', () => {
+    const html = renderToStaticMarkup(
+      <OfficeAgentPanel agent={agents[0]!} overview={overview} onClose={() => undefined} onChanged={() => undefined} />,
+    );
+    expect(html).toContain('Qwen role');
+    expect(html).toContain('Today');
+    expect(html).toContain('New work order');
+    expect(html).toContain('Send work order');
+    expect(html).toContain('Pause this AI');
   });
 
   it('renders the staff roster with limits and state', () => {

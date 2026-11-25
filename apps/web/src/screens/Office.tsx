@@ -4,11 +4,11 @@
 // what to set), the boss is not signed in (one field), or the office is open.
 // The dashboard itself is deliberately quiet: a floor plan, four counts, and
 // tabs for the things that need a decision.
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { OfficeOverview, OfficeTemplate } from '@agent-room/shared';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
-import { Office2D } from '../components/office/Office2D.js';
+import { PixelOffice } from '../components/office/pixel/PixelOffice.js';
 import { OfficeStaffPanel } from '../components/office/OfficeStaffPanel.js';
 import { OfficeProjectsPanel } from '../components/office/OfficeProjectsPanel.js';
 import { OfficeWorkPanel } from '../components/office/OfficeWorkPanel.js';
@@ -243,7 +243,13 @@ export function Office() {
         {!overview ? (
           <Card><Empty>{busy ? 'Loading the office…' : 'No data yet.'}</Empty></Card>
         ) : tab === 'floor' ? (
-          <FloorTab overview={overview} selectedAgent={selectedAgent} onSelect={setSelectedAgent} onAddStaff={() => setTab('staff')} />
+          <FloorTab
+            overview={overview}
+            selectedAgent={selectedAgent}
+            onSelect={setSelectedAgent}
+            onAddStaff={() => setTab('staff')}
+            onChanged={onChanged}
+          />
         ) : tab === 'work' ? (
           <OfficeWorkPanel overview={overview} onChanged={onChanged} />
         ) : tab === 'staff' ? (
@@ -267,13 +273,13 @@ export function Office() {
   );
 }
 
-function FloorTab({ overview, selectedAgent, onSelect, onAddStaff }: {
+function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onChanged }: {
   overview: OfficeOverview;
   selectedAgent?: string;
-  onSelect: (id: string) => void;
+  onSelect: (id: string | undefined) => void;
   onAddStaff: () => void;
+  onChanged: () => void | Promise<void>;
 }) {
-  const selected = useMemo(() => overview.agents.find(agent => agent.id === selectedAgent), [overview.agents, selectedAgent]);
   const counts = overview.counts;
   const cards = [
     { label: 'AI staff on duty', value: `${counts.onlineAgents}/${counts.agents}`, hint: 'heartbeat within 10 minutes' },
@@ -302,44 +308,27 @@ function FloorTab({ overview, selectedAgent, onSelect, onAddStaff }: {
         </ul>
       ) : null}
 
-      <Office2D agents={overview.agents} pendingApprovals={overview.counts.pendingApproval}
-        selectedId={selectedAgent} onSelect={onSelect} onAddStaff={onAddStaff} />
+      <PixelOffice
+        overview={overview}
+        selectedId={selectedAgent}
+        onSelect={onSelect}
+        onAddStaff={onAddStaff}
+        onChanged={() => void onChanged()}
+      />
 
-      <div className="grid gap-5 lg:grid-cols-[1.2fr_1fr]">
-        <Card>
-          <SectionTitle
-            title={selected ? `${selected.name} · ${selected.role}` : 'Pick a desk'}
-            hint={selected ? undefined : 'Click a desk to see what that agent is holding right now.'}
-            action={selected ? <Badge tone={selected.presence.status === 'working' ? 'info' : selected.presence.status === 'idle' ? 'good' : 'neutral'}>{selected.presence.label}</Badge> : undefined}
-          />
-          {selected ? (
-            <dl className="grid gap-2 text-xs">
-              <div className="flex justify-between gap-3"><dt className="text-ink-faint">Current work</dt><dd className="text-right font-semibold text-ink">{selected.presence.taskId ? `${selected.presence.taskId} · ${selected.presence.roomCode}` : 'nothing assigned'}</dd></div>
-              <div className="flex justify-between gap-3"><dt className="text-ink-faint">Today</dt><dd className="text-right font-semibold text-ink">{selected.tasksToday} of {selected.dailyTaskLimit || '∞'} tasks</dd></div>
-              <div className="flex justify-between gap-3"><dt className="text-ink-faint">Last heartbeat</dt><dd className="text-right font-semibold text-ink">{selected.presence.heartbeatAgeMs !== undefined ? `${Math.round(selected.presence.heartbeatAgeMs / 60_000)} min ago` : 'never'}</dd></div>
-              <div className="flex justify-between gap-3"><dt className="text-ink-faint">Approval gate</dt><dd className="text-right font-semibold text-ink">{selected.requiresApproval ? 'its work needs approval' : 'may work without asking'}</dd></div>
-              <div className="flex justify-between gap-3"><dt className="text-ink-faint">Tags</dt><dd className="text-right font-semibold text-ink">{selected.tags.join(', ') || 'none'}</dd></div>
-              {selected.brief ? <div className="rounded-lg bg-surface-soft p-2 text-[11px] leading-relaxed text-ink-muted">{selected.brief}</div> : null}
-            </dl>
-          ) : (
-            <Empty>Every desk on the floor is clickable. Use the Staff tab to add, pause or retune an agent.</Empty>
-          )}
-        </Card>
-
-        <Card>
-          <SectionTitle title="Latest minutes" hint="Ended meetings, kept permanently." action={<Badge tone="info">{overview.counts.archivedMeetings}</Badge>} />
-          {overview.archives.length === 0 ? <Empty>No meetings archived yet.</Empty> : (
-            <ul className="grid gap-1.5">
-              {overview.archives.map(archive => (
-                <li key={archive.id} className="rounded-lg border border-border-faint bg-white px-3 py-2">
-                  <p className="truncate text-xs font-semibold text-ink">{archive.topic}</p>
-                  <p className="text-[10px] text-ink-faint">{formatDate(archive.archivedAt)} · {archive.roomCode}</p>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      </div>
+      <Card>
+        <SectionTitle title="Latest minutes" hint="Ended meetings, kept permanently." action={<Badge tone="info">{overview.counts.archivedMeetings}</Badge>} />
+        {overview.archives.length === 0 ? <Empty>No meetings archived yet.</Empty> : (
+          <ul className="grid gap-1.5 sm:grid-cols-2">
+            {overview.archives.map(archive => (
+              <li key={archive.id} className="rounded-lg border border-border-faint bg-white px-3 py-2">
+                <p className="truncate text-xs font-semibold text-ink">{archive.topic}</p>
+                <p className="text-[10px] text-ink-faint">{formatDate(archive.archivedAt)} · {archive.roomCode}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
     </div>
   );
 }

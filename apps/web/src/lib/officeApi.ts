@@ -139,7 +139,16 @@ export const saveTemplate = (template: Partial<OfficeTemplate> & { name: string;
   request<{ template: OfficeTemplate }>('templates.save', { template }).then(payload => payload.template);
 export const deleteTemplate = (id: string) => request<{ removed: boolean }>('templates.delete', { id });
 export const applyTemplate = (id: string) =>
-  request<{ roomCode: string; joinUrl: string; roomUrl: string; tasks: unknown[]; skipped: string[]; seated: string[] }>('templates.apply', { id });
+  request<{
+    roomCode: string;
+    joinUrl: string;
+    roomUrl: string;
+    tasks: unknown[];
+    skipped: string[];
+    seated: string[];
+    /** Assignment plan the server computed for the template's tasks. */
+    plan?: Array<{ index: number; agentId?: string; agentName?: string; requiresApproval: boolean }>;
+  }>('templates.apply', { id });
 
 export const saveSettings = (settings: Partial<OfficeSettings>) =>
   request<{ settings: OfficeSettings }>('settings.save', { settings }).then(payload => payload.settings);

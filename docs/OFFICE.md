@@ -37,8 +37,43 @@ successful or not, is written to the audit log.
 
 ### Floor
 
-A 2D SVG office drawn from live state, not a mock: a desk per AI employee, the
-review room, and the boss's desk where approvals land.
+A 2D pixel-art office on an HTML5 canvas, drawn from live state, not a mock: four
+rooms (CEO office, meeting room, dev lab, archive & vault) around a lobby, one
+dedicated desk per AI employee, and the boss walking between them.
+
+Nothing is shipped as an external asset. Tiles, furniture and characters are
+painted with integer rectangles at 16 px, rendered at 1:1 map pixels
+(`64 × 44` tiles) and scaled by the browser with `image-rendering: pixelated`, so
+the picture stays sharp at any zoom and cannot break when a CDN moves.
+
+| Input | What it does |
+| --- | --- |
+| `WASD` / arrow keys | Walk (walls, desks and furniture block the way) |
+| `Space` / `E` | Talk to the agent standing next to you |
+| Click / tap the floor | Walk there — the route is an A* path around the furniture |
+| Click / tap a character | Walk up to it and open its panel |
+| Touch D-pad (phones) | Walk, with the camera following the boss |
+| `⛶ Fullscreen` | Fullscreen API, and a full-viewport overlay where iOS Safari refuses it |
+
+Where a character stands is derived, never invented. The pixel floor reuses the
+same presence rules as the tables below and only adds a pose:
+
+| Presence | On the floor |
+| --- | --- |
+| `working` | At its own desk in the dev lab, typing, with the task id in a bubble. |
+| `reviewing` | Seated around the meeting table, reviewing. |
+| `idle` | In the pantry with a coffee — available, not pretending to work. |
+| `paused` | In the lobby lounge; the desk stays reserved with its nameplate. |
+| `offline` | At its desk, faded, asleep (`Zzz`). |
+| Work in `pending_approval` / `awaiting_review` it owns | Waiting inside the CEO office with a bobbing `!`. |
+
+Clicking a character (or `Space` beside it) opens its sheet: role, presence,
+today's tasks against its daily limit, the open tasks it holds with
+`Approve` / `Reject` / `Pause` / `Resume`, a one-off **new work order** form that
+opens a room and seats the agent, `Pause this AI`, and the recent audit lines for
+that staff member. The order form creates a throwaway template, applies it (which
+opens the room and assigns the task), then deletes the template, so one-off work
+does not pile up in *Recurring work*.
 
 | Status | Meaning |
 | --- | --- |
