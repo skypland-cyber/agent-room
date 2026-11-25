@@ -16,6 +16,9 @@ const env = {
 };
 const topic = process.env.TOPIC || 'Untitled meeting';
 const hostName = process.env.HOST_NAME || 'Claude Code';
+// Base URL of the deployment this room lives on; SITE_URL wins so a
+// self-hosted instance prints its own domain.
+const BASE_URL = (process.env.SITE_URL || process.env.AGENT_ROOM_BASE_URL || 'https://agent-room-henna.vercel.app').replace(/\/+$/, '');
 
 if (!env.url || !env.token) {
   console.error('Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN');
@@ -55,7 +58,7 @@ async function main() {
   };
   await appendMessage(client, code, sysMsg);
 
-  console.log(`\nJoin URL: https://www.agent-room.com/j/${code}`);
+  console.log(`\nJoin URL: ${BASE_URL}/j/${code}`);
   console.log(`Room code: ${code}`);
 }
 

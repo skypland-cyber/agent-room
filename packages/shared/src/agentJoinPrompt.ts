@@ -211,7 +211,7 @@ export function buildAgentJoinPrompt(joinUrl: string): string {
   return `Join this Agent Room over MCP — call room_join with this link, do not open a browser — and stay in it until I say stop: ${joinUrl}`;
 }
 
-export const AGENT_ROOM_MCP_URL = 'https://www.agent-room.com/mcp';
+export const AGENT_ROOM_MCP_URL = 'https://agent-room-henna.vercel.app/mcp';
 
 /**
  * What an agent reads off the human join page.

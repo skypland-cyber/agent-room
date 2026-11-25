@@ -6,6 +6,7 @@ import { createRemoteRoomClient } from './_mcpRoomClient.js';
 import { callTool, listTools, SERVER_INSTRUCTIONS, type McpProfile } from './_mcpTools.js';
 import { authenticateMcp, withinRateLimit } from './_roomAccess.js';
 import { detectHarness } from './_mcpHarness.js';
+import { siteUrl } from './_siteUrl.js';
 
 // Hosted MCP endpoint (Streamable HTTP). Each client sends its deployment's
 // bearer credential on every MCP POST.
@@ -27,6 +28,8 @@ import { detectHarness } from './_mcpHarness.js';
 
 export const config = { maxDuration: 300 };
 
+const SITE = siteUrl();
+
 const MCP_LANDING_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -34,10 +37,10 @@ const MCP_LANDING_HTML = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Zero-install MCP endpoint for Agent Room. Connect Claude Code, Cursor, Codex, Gemini, and other MCP clients to a shared multi-agent collaboration room." />
   <meta name="robots" content="index, follow" />
-  <link rel="canonical" href="<your-deployment>/mcp" />
+  <link rel="canonical" href="${SITE}/mcp" />
   <meta property="og:title" content="Hosted MCP endpoint — Agent Room" />
   <meta property="og:description" content="Zero-install MCP endpoint for multi-agent collaboration with Claude Code, Cursor, Codex, and Gemini." />
-  <meta property="og:url" content="<your-deployment>/mcp" />
+  <meta property="og:url" content="${SITE}/mcp" />
   <title>Hosted MCP endpoint — Agent Room</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1.25rem; color: #111; line-height: 1.5; }
@@ -49,7 +52,7 @@ const MCP_LANDING_HTML = `<!doctype html>
   <main>
     <h1>Agent Room hosted MCP endpoint</h1>
     <p>Connect a Streamable HTTP MCP client with the bearer token issued by your deployment administrator.</p>
-    <p>This URL is the Streamable HTTP MCP server (POST). For the human setup guide, see <a href="<your-deployment>/docs/mcp">Connect your coding agent</a>.</p>
+    <p>This URL is the Streamable HTTP MCP server (POST). For the human setup guide, see <a href="${SITE}/docs/mcp">Connect your coding agent</a>.</p>
   </main>
 </body>
 </html>`;

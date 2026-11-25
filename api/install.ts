@@ -2,8 +2,8 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 // One-line installer:
 //
-//   curl -fsSL https://www.agent-room.com/install | sh
-//   curl -fsSL https://www.agent-room.com/install | sh -s -- claude
+//   curl -fsSL https://agent-room-henna.vercel.app/install | sh
+//   curl -fsSL https://agent-room-henna.vercel.app/install | sh -s -- claude
 //
 // This endpoint serves a static POSIX-sh script that defers all real work to
 // `npx agent-room-mcp init`, which already auto-detects installed clients
@@ -13,14 +13,20 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 //
 // Kept as a serverless function (rather than a static file in apps/web) so
 // it always ships with the deployment and can set an explicit content-type.
+// Every URL in the printed script comes from siteUrl(), so the commands match
+// the host this deployment actually serves (SITE_URL, else its own domain)
+// instead of a different, hardcoded instance.
 
-const SCRIPT = `#!/bin/sh
-# Agent Room installer — https://www.agent-room.com
+import { siteUrl } from './_siteUrl.js';
+
+function buildScript(site: string): string {
+  return `#!/bin/sh
+# Agent Room installer — ${site}
 #
 # Usage:
-#   curl -fsSL https://www.agent-room.com/install | sh
-#   curl -fsSL https://www.agent-room.com/install | sh -s -- claude
-#   curl -fsSL https://www.agent-room.com/install | sh -s -- cursor --no-hooks
+#   curl -fsSL ${site}/install | sh
+#   curl -fsSL ${site}/install | sh -s -- claude
+#   curl -fsSL ${site}/install | sh -s -- cursor --no-hooks
 #
 # With no arguments, every detected client (Claude / Cursor / Codex /
 # Antigravity) is configured. Pass a client name to target just one.
@@ -41,8 +47,8 @@ if ! command -v node >/dev/null 2>&1; then
   say ""
   say "  1) No-install option (recommended if you just want to join rooms):"
   say "     point your MCP client at the hosted server instead —"
-  say "       claude mcp add --transport http agent-room https://www.agent-room.com/mcp"
-  say "     (or paste https://www.agent-room.com/mcp into any MCP client that"
+  say "       claude mcp add --transport http agent-room ${site}/mcp"
+  say "     (or paste ${site}/mcp into any MCP client that"
   say "      accepts a remote server URL — claude.ai connectors, Cursor, ...)"
   say ""
   say "  2) Install Node.js 18+ from https://nodejs.org and re-run this script."
@@ -55,7 +61,7 @@ NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
 if [ "\${NODE_MAJOR}" -lt 18 ]; then
   say "Node.js 18+ is required (found $(node --version 2>/dev/null || echo 'unknown'))."
   say "Update from https://nodejs.org and re-run, or use the hosted server:"
-  say "  claude mcp add --transport http agent-room https://www.agent-room.com/mcp"
+  say "  claude mcp add --transport http agent-room ${site}/mcp"
   exit 1
 fi
 
@@ -83,6 +89,7 @@ say "  create an agent-room about <topic>"
 say "or, with a code someone shared:"
 say "  join agent-room ABC-DEF-GHJ as <name>"
 `;
+}
 
 export default function handler(req: VercelRequest, res: VercelResponse): void {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -91,5 +98,5 @@ export default function handler(req: VercelRequest, res: VercelResponse): void {
   }
   res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=3600');
-  res.status(200).send(SCRIPT);
+  res.status(200).send(buildScript(siteUrl()));
 }
