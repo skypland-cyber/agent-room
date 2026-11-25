@@ -18,6 +18,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { fieldValue, multipartBoundary, parseMultipart, readRequestBody, type ParsedPart } from './_multipart.js';
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIMES = new Set([
@@ -93,13 +94,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const contentType = String(req.headers['content-type'] ?? '');
-  const boundaryMatch = /boundary=("?)([^";]+)\1/.exec(contentType);
-  if (!boundaryMatch) {
+  const boundary = multipartBoundary(String(req.headers['content-type'] ?? ''));
+  if (!boundary) {
     res.status(400).json({ error: 'invalid_multipart', message: 'Body must be multipart/form-data with a boundary.' });
     return;
   }
-  const boundary = boundaryMatch[2]!;
 
   let body: Buffer;
   try {
@@ -118,16 +117,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const filePart = parts.find(p => p.name === 'file' && p.filename !== undefined);
-  const roomCodePart = parts.find(p => p.name === 'roomCode');
-  const widthPart = parts.find(p => p.name === 'width');
-  const heightPart = parts.find(p => p.name === 'height');
+  const fileParts: ParsedPart[] = parts.filter(p => p.name === 'file' && p.filename !== undefined);
+  const filePart = fileParts[0];
+  const roomCodePart = fieldValue(parts, 'roomCode');
+  const widthPart = fieldValue(parts, 'width');
+  const heightPart = fieldValue(parts, 'height');
 
   if (!filePart) {
     res.status(400).json({ error: 'missing_file', message: 'No file field in form data.' });
     return;
   }
-  const roomCode = roomCodePart ? roomCodePart.data.toString('utf8') : '';
+  const roomCode = roomCodePart ?? '';
   if (!/^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/.test(roomCode)) {
     res.status(400).json({ error: 'bad_room_code', message: 'Missing or malformed roomCode.' });
     return;
@@ -186,8 +186,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const publicUrl = `${env.publicUrl.replace(/\/$/, '')}/${key}`;
 
   const isImage = mime.startsWith('image/');
-  const widthNum = widthPart ? Number(widthPart.data.toString('utf8')) : NaN;
-  const heightNum = heightPart ? Number(heightPart.data.toString('utf8')) : NaN;
+  const widthNum = widthPart ? Number(widthPart) : NaN;
+  const heightNum = heightPart ? Number(heightPart) : NaN;
 
   const attachment = {
     id,
@@ -203,74 +203,4 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   };
 
   res.status(201).json(attachment);
-}
-
-// --- Multipart helpers ---
-
-function readRequestBody(req: VercelRequest, maxBytes: number): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    req.on('data', (chunk: Buffer | string) => {
-      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
-      total += buf.length;
-      if (total > maxBytes) {
-        reject(new Error(`Request body too large (${total} bytes > ${maxBytes}).`));
-        req.destroy();
-        return;
-      }
-      chunks.push(buf);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
-}
-
-interface ParsedPart {
-  name: string;
-  filename?: string;
-  contentType?: string;
-  data: Buffer;
-}
-
-function parseMultipart(body: Buffer, boundary: string): ParsedPart[] {
-  const dashBoundary = Buffer.from(`--${boundary}`);
-  const parts: ParsedPart[] = [];
-
-  let i = body.indexOf(dashBoundary);
-  if (i < 0) throw new Error('Boundary not found in body.');
-  i += dashBoundary.length;
-  if (body[i] === 0x0d && body[i + 1] === 0x0a) i += 2;
-
-  while (i < body.length) {
-    const next = body.indexOf(dashBoundary, i);
-    if (next < 0) throw new Error('Truncated multipart body.');
-
-    const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), i);
-    if (headerEnd < 0 || headerEnd > next) throw new Error('Malformed part headers.');
-    const headersRaw = body.slice(i, headerEnd).toString('utf8');
-    let dataEnd = next - 2;
-    if (dataEnd < headerEnd + 4) dataEnd = headerEnd + 4;
-    const data = body.slice(headerEnd + 4, dataEnd);
-
-    const part: ParsedPart = { name: '', data };
-    for (const line of headersRaw.split('\r\n')) {
-      const lower = line.toLowerCase();
-      if (lower.startsWith('content-disposition:')) {
-        const nameMatch = /name="([^"]*)"/.exec(line);
-        const fileMatch = /filename="([^"]*)"/.exec(line);
-        if (nameMatch) part.name = nameMatch[1]!;
-        if (fileMatch) part.filename = fileMatch[1]!;
-      } else if (lower.startsWith('content-type:')) {
-        part.contentType = line.slice(line.indexOf(':') + 1).trim();
-      }
-    }
-    parts.push(part);
-
-    i = next + dashBoundary.length;
-    if (body[i] === 0x2d && body[i + 1] === 0x2d) break;
-    if (body[i] === 0x0d && body[i + 1] === 0x0a) i += 2;
-  }
-
-  return parts;
 }

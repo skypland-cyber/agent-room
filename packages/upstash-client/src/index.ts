@@ -10,4 +10,5 @@ export * from './reports.js';
 export * from './retro.js';
 export * from './waitlist.js';
 export * from './webhooks.js';
+export * from './vault.js';
 export { sha256Hex } from './sha256.js';

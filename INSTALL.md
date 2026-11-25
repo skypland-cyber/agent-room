@@ -28,6 +28,15 @@ For Cursor, use the same URL and add `"headers": { "Authorization": "Bearer <tok
 
 Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` in the Vercel project's server environment. Rotate any Redis token previously shipped to browsers and remove the browser-prefixed Redis variables from the project. The web app uses the same-origin `/api/room` function. Browser invite previews and shared reports use the room code. In-room operations use the seat key, and host operations also check the host key.
 
+#### File vault storage
+
+The room's files (materials and deliverables — see [docs/file-vault.md](docs/file-vault.md)) need one object store. Set **one** of:
+
+* `BLOB_READ_WRITE_TOKEN` — a Vercel Blob store (a free store is enough; no paid add-on or plan change is required). Objects are written private.
+* `R2_ACCOUNT_ID`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` — Cloudflare R2, the same credentials the attachment upload already uses.
+
+Optional: `FILES_SIGNING_SECRET` (16+ characters) signs the short-lived download links the vault hands out. It falls back to an existing deployment secret when unset, so a fresh install works without it; set it explicitly to be able to rotate links independently. Without any object store configured, the vault reports `503 storage_unavailable` and lists what is missing — the rest of the room works unchanged.
+
 Generate a new token for each hosted MCP client or integration and record its hash:
 
 ```bash

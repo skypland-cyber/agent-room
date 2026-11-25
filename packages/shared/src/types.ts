@@ -138,7 +138,8 @@ export type SystemEventType =
   | 'login_nudge'
   | 'moderator_handoff'  // moderator timed out / left — floor handed to a deputy
   | 'task_update'        // evidence-gated task board changed state
-  | 'project_prompt_updated'; // host set/cleared the room's project prompt
+  | 'project_prompt_updated' // host set/cleared the room's project prompt
+  | 'file_update';      // a vault file was added, revised or linked to work
 
 // Default per-role timeout values (in ms). Used when a room hasn't been
 // configured with custom overrides. Agent turns can involve real code edits,
@@ -550,6 +551,11 @@ export interface TaskLease {
   handoff?: TaskLeaseHandoffRequest;
 }
 
+export interface TaskFiles {
+  inputs?: string[];       // material ids the work started from
+  deliverables?: string[]; // deliverable ids the work produced (newest last)
+}
+
 export interface Task {
   id: string;            // short human id, e.g. "T-01"
   title: string;
@@ -582,6 +588,12 @@ export interface Task {
   reviewReceipt?: { by: string; byClient: ClientKind; notificationId?: string; readAt: number; startedAt?: number };
   notification?: TaskNotification;
   requirements?: TaskRequirements;
+  // Vault links: the material file ids this task works FROM and the
+  // deliverable file ids it produced. Ids point into the room's vault
+  // (VaultFile.id), so the board can show a task's paper trail without
+  // copying any file metadata onto the task. Append-only in practice: a
+  // later version of the same deliverable keeps its id.
+  files?: TaskFiles;
   // Fenced MCP execution: every claim/recovery mints a new attempt + lease.
   attempts?: TaskAttempt[];
   execution?: { attemptId: string; recoveryRequired: boolean; decisionRequired?: boolean };

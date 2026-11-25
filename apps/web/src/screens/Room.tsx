@@ -5,6 +5,7 @@ import { useTaskBoard } from '../hooks/useTaskBoard.js';
 import { Bubble } from '../components/Bubble.js';
 import { AgentCapabilities } from '../components/AgentCapabilities.js';
 import { TaskBoard, canRuleOn } from '../components/TaskBoard.js';
+import { VaultPanel } from '../components/VaultPanel.js';
 import { VoiceButton } from '../components/VoiceButton.js';
 import { MeetingCodePill } from '../components/MeetingCodePill.js';
 import { Avatar } from '../components/Avatar.js';
@@ -293,7 +294,11 @@ export function Room() {
     }
   }
 
-  const [mobilePanel, setMobilePanel] = useState<'chat' | 'tasks' | 'people'>('chat');
+  const [mobilePanel, setMobilePanel] = useState<'chat' | 'tasks' | 'files' | 'people'>('chat');
+  // Desktop right column: the board and the file shelf share one side panel.
+  // Two panels side by side would squeeze the chat to a column of two words.
+  const [rightPanel, setRightPanel] = useState<'tasks' | 'files'>('tasks');
+  const [vaultTaskFilter, setVaultTaskFilter] = useState<string | undefined>(undefined);
   const [reportBusy, setReportBusy] = useState(false);
   const artifacts = extractArtifacts(messages);
   // Board lives here, not inside TaskBoard, so the tab strip can badge how
@@ -734,12 +739,13 @@ export function Room() {
           amber count when deliveries are waiting on a ruling so the signal
           reaches the user while they are still reading Chat.
         */}
-        <div className="lg:hidden grid grid-cols-3 gap-1.5 border-b border-border-faint bg-surface-softer p-1.5 shrink-0" role="tablist">
+        <div className="lg:hidden grid grid-cols-4 gap-1.5 border-b border-border-faint bg-surface-softer p-1.5 shrink-0" role="tablist">
           {([
             ['chat', 'Chat', messages.length, false],
             ['tasks', 'Tasks', openTaskCount, reviewTaskCount > 0],
+            ['files', 'Files', null, false],
             ['people', 'People', room.participants.length, false],
-          ] as const).map(([key, label, count, alert]) => {
+          ] as [ 'chat' | 'tasks' | 'files' | 'people', string, number | null, boolean][]).map(([key, label, count, alert]) => {
             const active = mobilePanel === key;
             return (
               <button
@@ -754,17 +760,19 @@ export function Room() {
                 }`}
               >
                 <span>{label}</span>
-                <span
-                  className={`text-[11px] px-1.5 py-0.5 rounded-full font-bold ${
-                    active
-                      ? 'bg-white/25 text-white'
-                      : alert
-                        ? 'bg-amber-100 text-amber-800'
-                        : 'bg-surface-sunken text-ink-faint'
-                  }`}
-                >
-                  {alert ? `${reviewTaskCount} review` : count}
-                </span>
+                {count !== null || alert ? (
+                  <span
+                    className={`text-[11px] px-1.5 py-0.5 rounded-full font-bold ${
+                      active
+                        ? 'bg-white/25 text-white'
+                        : alert
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-surface-sunken text-ink-faint'
+                    }`}
+                  >
+                    {alert ? `${reviewTaskCount} review` : count}
+                  </span>
+                ) : null}
               </button>
             );
           })}
@@ -1255,26 +1263,58 @@ export function Room() {
             )}
           </section>
 
-          <aside className={`${mobilePanel === 'tasks' ? 'flex' : 'hidden'} lg:flex min-h-0 min-w-0 flex-col border-l border-border-faint bg-surface`}>
+          <aside className={`${mobilePanel === 'tasks' || mobilePanel === 'files' ? 'flex' : 'hidden'} lg:flex min-h-0 min-w-0 flex-col border-l border-border-faint bg-surface`}>
+            {/*
+              Desktop: one side panel, two views. The switch is a segmented
+              control rather than two stacked panels, so the chat keeps its
+              width on a laptop and the phone tab strip stays one row.
+            */}
+            <div className="hidden lg:grid shrink-0 grid-cols-2 gap-1 border-b border-border-faint bg-surface-softer p-1.5">
+              {([['tasks', 'Tasks'], ['files', 'Files']] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={rightPanel === key}
+                  onClick={() => setRightPanel(key)}
+                  className={`min-h-8 rounded-md text-[12px] font-semibold transition ${
+                    rightPanel === key ? 'bg-surface text-ink shadow-sm' : 'text-ink-muted hover:text-ink'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             {/*
               The task board the MCP server has always had (room_task: owner,
               a different verifier, evidence, verdicts) but the web client
               never rendered. Before this, a host on a phone could only infer
               agent progress from chat prose and regex-scraped [TODO] markers.
             */}
-            <TaskBoard
-              code={code}
-              me={me}
-              isHost={isHost}
-              ended={ended}
-              agents={roomAgents}
-              artifacts={artifacts}
-              canExport={messages.length > 0}
-              reportBusy={reportBusy}
-              onExportReport={handleExportReport}
-              onMention={appendText}
-              taskBoard={taskBoard}
-            />
+            {(mobilePanel === 'files' ? 'files' : mobilePanel === 'tasks' ? 'tasks' : rightPanel) === 'files' ? (
+              <VaultPanel
+                code={code}
+                me={me}
+                isHost={isHost}
+                ended={ended}
+                {...(vaultTaskFilter ? { taskFilter: vaultTaskFilter, onClearTaskFilter: () => setVaultTaskFilter(undefined) } : {})}
+                onMention={appendText}
+              />
+            ) : (
+              <TaskBoard
+                code={code}
+                me={me}
+                isHost={isHost}
+                ended={ended}
+                agents={roomAgents}
+                artifacts={artifacts}
+                canExport={messages.length > 0}
+                reportBusy={reportBusy}
+                onExportReport={handleExportReport}
+                onMention={appendText}
+                taskBoard={taskBoard}
+                onOpenTaskFiles={taskId => { setVaultTaskFilter(taskId); setRightPanel('files'); setMobilePanel('files'); }}
+              />
+            )}
           </aside>
         </div>
       </div>

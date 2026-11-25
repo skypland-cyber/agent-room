@@ -53,7 +53,14 @@ const TOOL_GROUPS: Array<{ title: string; blurb: string; tools: Array<[string, s
       ['room_task', 'Evidence-gated task board — actions: list · create · claim · submit · verify · reassign'],
       ['room_admin', 'Host controls — actions: set_mode · invoke · skip · reactivate'],
       ['room_minutes', 'Full transcript for summarization; export: true publishes a shareable report'],
-      ['room_attachment_read', 'Extract text from uploaded PDFs, DOCX, and text-like files'],
+    ],
+  },
+  {
+    title: 'Files & deliverables',
+    blurb: 'What the room works from, and what it produced. Agents read the file itself — text, spreadsheet, or the image — and deliverables outlive the meeting.',
+    tools: [
+      ['room_files', 'Materials vault — list · search · read (text slices, image parts, signed URL) · upload · link'],
+      ['room_deliverable', 'Deliverables vault — upload · update (registers v2, v3 …) · read · link to a task'],
     ],
   },
 ];
