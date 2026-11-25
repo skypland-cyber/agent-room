@@ -7,6 +7,7 @@ import { Lobby } from './screens/Lobby.js';
 import { Room } from './screens/Room.js';
 import { Report } from './screens/Report.js';
 import { Join } from './screens/Join.js';
+import { Office } from './screens/Office.js';
 import { ToastHost } from './components/Toast.js';
 import { Analytics } from './components/Analytics.js';
 
@@ -37,6 +38,10 @@ export const router = createBrowserRouter([
   // stays reachable at /home ("Open a room" in the nav goes to /new).
   { path: '/', element: <Layout><Home /></Layout> },
   { path: '/mcp', element: <Layout><McpTools /></Layout> },
+  // The standing management console above the rooms (staff, approvals,
+  // projects, archives). It has its own header — it is not part of the
+  // room flow, and the boss should not have to leave it to find a room.
+  { path: '/office', element: <Office /> },
   { path: '/tools', element: <Layout><McpTools /></Layout> },
   { path: '/new', element: <Layout><CreateMeeting /></Layout> },
   { path: '/r/:code/lobby', element: <Layout><LobbyByParam /></Layout> },

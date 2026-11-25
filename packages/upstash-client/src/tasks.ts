@@ -382,6 +382,13 @@ function replaceTask(board: TaskBoard, next: Task): TaskBoard {
 export interface CreateTaskInput {
   id?: string;            // optional; auto-assigned T-NN when omitted
   title: string;
+  /** Important work: starts in pending_approval and only the boss may release it. */
+  requiresApproval?: boolean;
+  /** Automatic retry ceiling for this task (falls back to the office setting). */
+  maxRetries?: number;
+  /** Office project / template this board belongs to (stamped once, at creation). */
+  projectId?: string;
+  templateId?: string;
   owner?: string;
   ownerClient?: ClientKind;
   verifier?: string;
@@ -432,12 +439,25 @@ export async function createTask(
       verifierClient: input.verifierClient,
       dod: input.dod,
       ...(requirements ? { requirements } : {}),
-      state: 'todo',
+      // Approval gate: an important task is born blocked. Creating it must not
+      // be a way around the boss's sign-off, so the state itself is the gate —
+      // not a flag a caller could forget to check.
+      ...(input.requiresApproval
+        ? { state: 'pending_approval' as const,
+          approval: { required: true as const, status: 'pending' as const, requestedBy: input.createdBy, requestedAt: now } }
+        : { state: 'todo' as const }),
+      ...(typeof input.maxRetries === 'number' ? { maxRetries: input.maxRetries } : {}),
       createdBy: input.createdBy,
       createdAt: now,
       updatedAt: now,
     };
-    return { ...current, tasks: [...current.tasks, created], lastProgressAt: now };
+    return {
+      ...current,
+      tasks: [...current.tasks, created],
+      lastProgressAt: now,
+      ...(input.projectId && !current.projectId ? { projectId: input.projectId } : {}),
+      ...(input.templateId && !current.templateId ? { templateId: input.templateId } : {}),
+    };
   });
   // Index this room for the periodic board-review sweep (best-effort).
   await registerBoardRoom(client, code).catch(() => { /* best-effort */ });
@@ -486,6 +506,11 @@ export async function claimTask(
       );
     }
     if (task.state === 'blocked') throw new TaskStateError(`Task ${id} is waiting; use room_task resume with a resolution before claiming it.`);
+    if (task.state === 'pending_approval') {
+      throw new TaskStateError(`Task ${id} is waiting for the boss's approval; it cannot be claimed until the office releases it.`);
+    }
+    if (task.state === 'paused') throw new TaskStateError(`Task ${id} is paused; the office resumes it before anyone claims it.`);
+    if (task.state === 'aborted') throw new TaskStateError(`Task ${id} was aborted by the boss; create a new task instead of reviving it.`);
     if (claimerIsDesignatedVerifier(task, owner)) {
       throw new VerifierCannotClaimError(id, task.verifier!);
     }
@@ -733,6 +758,261 @@ export async function cancelTask(
     return { ...replaceTask(current, updated), lastProgressAt: now };
   });
   return { board, task: findTask(board, updated!.id) };
+}
+
+// ─── Office controls: approval, pause, abort, QA and retries ──────────────
+//
+// These live on the same board as everything else, behind the same CAS, so a
+// boss's pause and an agent's submit cannot both win. They are additive: a
+// board written before these states existed keeps working, because every new
+// field is optional and 'todo'/'in_progress' behave exactly as before.
+
+const OPEN_FOR_PAUSE: ReadonlySet<TaskState> = new Set<TaskState>(['todo', 'pending_approval', 'in_progress', 'blocked', 'rejected']);
+
+/** Suspend a task without losing anything. Reversible; the reason is kept. */
+export async function pauseTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  actor: { name: string; client: ClientKind },
+  reason?: string,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.state === 'paused') return current;
+    if (task.state === 'done' || task.state === 'cancelled' || task.state === 'aborted') {
+      throw new TaskStateError(`Task ${id} is ${task.state} — a closed task cannot be paused.`);
+    }
+    if (!OPEN_FOR_PAUSE.has(task.state)) {
+      throw new TaskStateError(`Task ${id} is ${task.state}; finish or reject the review before pausing it.`);
+    }
+    const clean = reason?.trim().slice(0, 500);
+    const paused = finishTaskAttempt(task, 'waiting', 'task_paused', now);
+    updated = {
+      ...paused,
+      state: 'paused',
+      pause: {
+        by: actor.name, byClient: actor.client, at: now,
+        resumeState: task.state,
+        ...(clean ? { reason: clean } : {}),
+      },
+      updatedAt: now,
+    };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: findTask(board, id) };
+}
+
+/** Put a paused task back where it was. */
+export async function unpauseTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  actor: { name: string; client: ClientKind },
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.state !== 'paused') throw new TaskStateError(`Task ${id} is ${task.state}, not paused.`);
+    const back: TaskState = task.pause?.resumeState && task.pause.resumeState !== 'paused'
+      ? task.pause.resumeState : 'todo';
+    updated = {
+      ...task,
+      state: back,
+      pause: task.pause
+        ? { ...task.pause, resumedAt: now, resumedBy: actor.name, resumedClient: actor.client }
+        : task.pause,
+      updatedAt: now,
+    };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: findTask(board, id) };
+}
+
+/** Stop a task for good. Terminal: the reason stays on the archived task. */
+export async function abortTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  actor: { name: string; client: ClientKind },
+  reason?: string,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.state === 'done') throw new TaskDoneImmutableError(id);
+    if (task.state === 'aborted') return current;
+    const clean = reason?.trim().slice(0, 500);
+    const stopped = finishTaskAttempt(task, 'cancelled', 'task_aborted', now);
+    updated = {
+      ...stopped,
+      state: 'aborted',
+      abort: { by: actor.name, byClient: actor.client, at: now, ...(clean ? { reason: clean } : {}) },
+      updatedAt: now,
+    };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: findTask(board, id) };
+}
+
+/** Put an existing task behind the boss's gate (from todo only). */
+export async function requireTaskApproval(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  actor: { name: string; client: ClientKind },
+  note?: string,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.state === 'pending_approval') return current;
+    if (task.state !== 'todo') {
+      throw new TaskStateError(`Task ${id} is ${task.state}; only an unstarted task can be sent for approval.`);
+    }
+    const clean = note?.trim().slice(0, 500);
+    updated = {
+      ...task,
+      state: 'pending_approval',
+      approval: {
+        required: true, status: 'pending', requestedBy: actor.name, requestedAt: now,
+        ...(clean ? { note: clean } : {}),
+      },
+      updatedAt: now,
+    };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: findTask(board, id) };
+}
+
+/**
+ * The boss's ruling on an important task. Approving releases it to the board as
+ * 'todo'; rejecting archives it with the note, because "not approved" means the
+ * work should not be done — not that the producer failed to do it.
+ */
+export async function decideTaskApproval(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  decision: 'approved' | 'rejected',
+  actor: { name: string; client: ClientKind },
+  note?: string,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.state !== 'pending_approval' || task.approval?.status !== 'pending') {
+      throw new TaskStateError(`Task ${id} is not waiting for approval (${task.state}).`);
+    }
+    const clean = note?.trim().slice(0, 1000);
+    const approval = {
+      ...task.approval,
+      status: decision,
+      decidedBy: actor.name,
+      decidedAt: now,
+      ...(clean ? { note: clean } : {}),
+    };
+    updated = decision === 'approved'
+      ? { ...task, state: 'todo', approval, updatedAt: now }
+      : {
+        ...task,
+        state: 'cancelled',
+        approval,
+        cancellation: {
+          by: actor.name, byClient: actor.client, at: now,
+          reason: `Approval rejected${clean ? `: ${clean}` : ''}`,
+        },
+        updatedAt: now,
+      };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: findTask(board, id) };
+}
+
+/**
+ * Peer quality check. Deliberately a separate record from the completion
+ * verdict: the verifier answers "does this meet the definition of done", QA
+ * answers "is this good", and a producer can never QA its own work.
+ */
+export async function recordTaskQa(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  reviewer: { name: string; client: ClientKind },
+  status: 'pending' | 'passed' | 'failed',
+  notes?: string,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    if (task.owner && sameAgentName(task.owner, reviewer.name)) {
+      throw new TaskStateError('The producer cannot run QA on their own delivery — a different agent must check it.');
+    }
+    if (task.state !== 'awaiting_review' && task.state !== 'done') {
+      throw new TaskStateError(`Task ${id} is ${task.state}; QA runs on submitted or completed work.`);
+    }
+    const clean = notes?.trim().slice(0, 2000);
+    updated = {
+      ...task,
+      qa: { reviewer: reviewer.name, reviewerClient: reviewer.client, status, at: now, ...(clean ? { notes: clean } : {}) },
+      updatedAt: now,
+    };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: findTask(board, id) };
+}
+
+/**
+ * One automatic retry after a rejection: back to in_progress with the attempt
+ * counted, optionally handed to another agent. The retry ceiling is enforced
+ * here rather than by the caller, so a loop of retries cannot outrun the limit.
+ */
+export async function retryTask(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  actor: { name: string; client: ClientKind },
+  options: { reason?: string; to?: string; maxRetries?: number } = {},
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  let updated: Task;
+  const board = await casTaskBoard(client, code, (current, room) => {
+    const task = findTask(current, id);
+    if (task.state !== 'rejected') {
+      throw new TaskStateError(`Task ${id} is ${task.state}; only a rejected task is retried.`);
+    }
+    const ceiling = options.maxRetries ?? task.maxRetries;
+    const retryCount = (task.retryCount ?? 0) + 1;
+    if (typeof ceiling === 'number' && retryCount > ceiling) {
+      throw new TaskStateError(`Task ${id} has already used its ${ceiling} retries — the boss must decide what happens next.`);
+    }
+    const to = options.to?.trim();
+    if (to && room && !room.participants.some(p => p.name.trim().toLowerCase() === to.toLowerCase())) {
+      throw new TaskStateError(`The hand-off target ${to} is not in this room.`);
+    }
+    if (to && task.verifier && to.toLowerCase() === task.verifier.trim().toLowerCase()) {
+      throw new TaskStateError('The verifier cannot take over the work they are meant to check.');
+    }
+    const reason = options.reason?.trim().slice(0, 500) || 'Retry after rejection';
+    updated = {
+      ...task,
+      state: 'in_progress',
+      retryCount,
+      retries: [...(task.retries ?? []), { at: now, reason, attempt: retryCount,
+        ...(task.owner ? { from: task.owner } : {}), ...(to ? { to } : {}) }].slice(-20),
+      ...(to ? { owner: to, ownerClient: 'cc' as ClientKind } : {}),
+      updatedAt: now,
+    };
+    return { ...replaceTask(current, updated), lastProgressAt: now };
+  });
+  return { board, task: findTask(board, id) };
 }
 
 /**
@@ -1422,7 +1702,8 @@ export function boardDeliveredSection(board: TaskBoard | null | undefined): stri
 // collapse to a single trailing "✅ N done" line.
 export function summarizeBoard(board: TaskBoard): string {
   const icon: Record<TaskState, string> = {
-    todo: '⬜', in_progress: '🔵', awaiting_review: '🟡', blocked: '🟠', done: '✅', rejected: '🔴', cancelled: '🗑️',
+    todo: '⬜', pending_approval: '🛂', in_progress: '🔵', paused: '⏸️', awaiting_review: '🟡',
+    blocked: '🟠', done: '✅', rejected: '🔴', cancelled: '🗑️', aborted: '⛔',
   };
   const open = openTasks(board);
   const rejected = board.tasks.filter(t => t.state === 'rejected');

@@ -37,6 +37,25 @@ The room's files (materials and deliverables — see [docs/file-vault.md](docs/f
 
 Optional: `FILES_SIGNING_SECRET` (16+ characters) signs the short-lived download links the vault hands out. It falls back to an existing deployment secret when unset, so a fresh install works without it; set it explicitly to be able to rotate links independently. Without any object store configured, the vault reports `503 storage_unavailable` and lists what is missing — the rest of the room works unchanged.
 
+#### AI office (optional)
+
+`/office` is a standing management view above the rooms: AI staff with roles and
+daily limits, projects with long-term memory and work instructions, the boss's
+approval gate on important tasks, pause/abort, peer QA, permanent meeting
+archives and an audit log — see [docs/OFFICE.md](docs/OFFICE.md).
+
+Set one variable to turn it on:
+
+* `ADMIN_PASSWORD` — the boss's password for `/office`. Until it is set the
+  office is locked (`admin_not_configured`) and rooms, MCP and the vault are
+  unaffected.
+* `OFFICE_SESSION_SECRET` (optional, 32+ random characters) — signs the session
+  cookie. Without it the key is derived from `ADMIN_PASSWORD`, so changing the
+  password signs every session out.
+
+The office adds one Serverless Function (`api/office.ts`) and keys under
+`office:v1:` in the same Redis. It requires no other service.
+
 Generate a new token for each hosted MCP client or integration and record its hash:
 
 ```bash

@@ -32,6 +32,13 @@ import {
   updateTask,
   waitTask,
   resumeTask,
+  pauseTask,
+  unpauseTask,
+  abortTask,
+  decideTaskApproval,
+  recordTaskQa,
+  retryTask,
+  requireTaskApproval,
   acknowledgeTaskReview,
   operateTaskExecution,
   reconcileTaskReviews,
@@ -164,6 +171,7 @@ async function dispatchAction(store: UpstashClient, p: Record<string, unknown>):
           ...(p.verifier ? { verifier: str(p.verifier), verifierClient: 'cc' as const } : {}),
           ...(p.dod ? { dod: str(p.dod) } : {}),
           ...(p.requirements !== undefined ? { requirements: p.requirements as Parameters<typeof createTask>[2]['requirements'] } : {}),
+          ...(p.requiresApproval === true ? { requiresApproval: true } : {}),
         }));
       case 'taskClaim':
         // Every MCP claim starts a fenced execution; the seatKey proves the seat.
@@ -220,6 +228,54 @@ async function dispatchAction(store: UpstashClient, p: Record<string, unknown>):
         const proof = executionProof(p);
         return afterTaskWrite(store, code, await resumeTask(store, code, str(p.id), agent(p.name), str(p.resolution),
           Date.now(), host, proof.seatKey ? proof : undefined));
+      }
+      case 'taskPause':
+      case 'taskUnpause': {
+        // Pausing is a control action, not a work action: the owner may freeze
+        // its own task, and the proven host may freeze anyone's. A bystander
+        // agent stopping somebody else's work is how boards quietly die.
+        const host = await isProvenHost(store, code, p.hostKey);
+        if (!host) {
+          const board = await readBoard(store, code);
+          const task = board?.tasks.find(item => item.id === str(p.id));
+          if (!task || !task.owner || task.owner.trim().toLowerCase() !== str(p.requesterName).trim().toLowerCase()) {
+            throw new RemoteRoomApiError('Only the task owner or the host can pause or resume this task.', 403, 'access_denied');
+          }
+        }
+        return afterTaskWrite(store, code, p.action === 'taskPause'
+          ? await pauseTask(store, code, str(p.id), agent(p.requesterName), typeof p.reason === 'string' ? p.reason : undefined)
+          : await unpauseTask(store, code, str(p.id), agent(p.requesterName)));
+      }
+      case 'taskAbort':
+        // Terminal, and in the user's name: only the proven host may stop work.
+        await assertHostFor(store, code, str(p.hostKey));
+        return afterTaskWrite(store, code, await abortTask(store, code, str(p.id),
+          { name: str(p.requesterName) || 'host', client: 'web' },
+          typeof p.reason === 'string' ? p.reason : undefined));
+      case 'taskApprove': {
+        await assertHostFor(store, code, str(p.hostKey));
+        const decision = p.decision === 'rejected' ? 'rejected' : 'approved';
+        return afterTaskWrite(store, code, await decideTaskApproval(store, code, str(p.id), decision,
+          { name: str(p.requesterName) || 'host', client: 'web' },
+          typeof p.note === 'string' ? p.note : undefined));
+      }
+      case 'taskRequestApproval':
+        return afterTaskWrite(store, code, await requireTaskApproval(store, code, str(p.id),
+          agent(p.requesterName), typeof p.reason === 'string' ? p.reason : undefined));
+      case 'taskQa': {
+        const status = str(p.status) as 'pending' | 'passed' | 'failed';
+        if (!['pending', 'passed', 'failed'].includes(status)) {
+          throw new RemoteRoomApiError('QA status must be pending, passed or failed.', 400, 'bad_request');
+        }
+        return afterTaskWrite(store, code, await recordTaskQa(store, code, str(p.id), agent(p.name), status,
+          typeof p.notes === 'string' ? p.notes : undefined));
+      }
+      case 'taskRetry': {
+        const proof = executionProof(p);
+        return afterTaskWrite(store, code, await retryTask(store, code, str(p.id), agent(p.requesterName), {
+          ...(typeof p.reason === 'string' ? { reason: p.reason } : {}),
+          ...(typeof p.to === 'string' && p.to ? { to: p.to } : {}),
+        }));
       }
       case 'taskReviewAck': {
         const proof = executionProof(p);
@@ -489,10 +545,18 @@ export async function endRoom(
   _requesterName: string,
   hostKey: string | undefined,
 ): Promise<Room> {
-  return guarded(async () => {
+  const room = await guarded(async () => {
     await assertHostFor(client.store, code, hostKey);
     return storeEndRoom(client.store, code);
   });
+  // Permanent archive: rooms expire in 24h, the minutes should not. Loaded
+  // lazily so the office module can import this one without a cycle, and
+  // best-effort so an archive failure never blocks ending a meeting.
+  try {
+    const { captureRoomArchive } = await import('./_office.js');
+    await captureRoomArchive(client.store, code, { name: room.createdBy || 'host', kind: 'host' });
+  } catch { /* the room ended; the dashboard can archive it later */ }
+  return room;
 }
 
 export async function reactivateRoom(

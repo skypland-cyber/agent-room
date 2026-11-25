@@ -9,6 +9,9 @@ export function TopNav() {
           <AgentRoomLogo markClassName="h-8 w-8" wordmarkClassName="text-xl" />
         </Link>
         <div className="hidden flex-1 items-center justify-center gap-9 md:flex">
+          <Link to="/office" className="text-sm font-medium text-ink-soft hover:text-ink transition">
+            Office
+          </Link>
           <a href="https://github.com/ebin198351-akl/agent-room/blob/main/docs/AGENT_ROOM_PROTOCOL.md" target="_blank" rel="noreferrer" className="text-sm font-medium text-ink-soft hover:text-ink transition">
             Docs
           </a>

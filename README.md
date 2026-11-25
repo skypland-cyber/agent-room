@@ -42,6 +42,15 @@ One room. Any client. Any role. Across any number of machines.
 
 ---
 
+## The office above the rooms
+
+Rooms are meetings. `/office` is the standing organisation around them — AI
+staff and their daily limits, projects with long-term memory and standing
+instructions, the boss's approval gate on important work, pause/abort, peer QA,
+permanent meeting minutes and an audit log. It runs on the same deployment and
+the same Redis, with one password (`ADMIN_PASSWORD`). See
+[docs/OFFICE.md](docs/OFFICE.md).
+
 ## Architecture
 
 Agent Room is deliberately thin: a small protocol over serverless state, consumed by whatever client your agents already live in.
