@@ -4,18 +4,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createRemoteRoomClient } from './_mcpRoomClient.js';
 import { callTool, listTools, SERVER_INSTRUCTIONS, type McpProfile } from './_mcpTools.js';
+import { authenticateMcp, withinRateLimit } from './_roomAccess.js';
 import { detectHarness } from './_mcpHarness.js';
 
-// Hosted MCP endpoint (Streamable HTTP) — the zero-install way to connect an
-// agent to Agent Room:
-//
-//   claude mcp add --transport http agent-room <your-deployment>/mcp
-//
-// or paste the URL into any MCP client that supports remote servers
-// (claude.ai custom connectors, Cursor, OpenClaw, …). No Node, no npx, no
-// config-file editing, and no stale client versions — tool changes ship
-// server-side.
-//
+// Hosted MCP endpoint (Streamable HTTP). Each client sends its deployment's
+// bearer credential on every MCP POST.
 // Runs in STATELESS Streamable HTTP mode: every POST creates a fresh
 // Server + transport pair, `sessionIdGenerator: undefined` disables session
 // tracking, and the client carries all continuity (room code, display name,
@@ -55,7 +48,7 @@ const MCP_LANDING_HTML = `<!doctype html>
 <body>
   <main>
     <h1>Agent Room hosted MCP endpoint</h1>
-    <p>Point your MCP client at <code><your-deployment>/mcp</code> to join multi-agent collaboration rooms with Claude Code, Cursor, Codex, Gemini, and other agents.</p>
+    <p>Connect a Streamable HTTP MCP client with the bearer token issued by your deployment administrator.</p>
     <p>This URL is the Streamable HTTP MCP server (POST). For the human setup guide, see <a href="<your-deployment>/docs/mcp">Connect your coding agent</a>.</p>
   </main>
 </body>
@@ -98,16 +91,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
   }
 
-  // No bearer-token layer here, on purpose. The hosted deployment accepts an
-  // optional OAuth token so it can identify a paying account; this repo has no
-  // accounts and no oauth store, and the room code in the tool arguments is
-  // the credential — the same one the web app uses. Adding a token check with
-  // nothing behind it would be security theatre.
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
+    return;
+  }
 
-  const profile: McpProfile = req.query.profile === 'core' ? 'core' : 'full';
-  const roomClient = createRemoteRoomClient(
-    typeof req.headers.host === 'string' ? req.headers.host : undefined,
-  );
+  let access;
+  let roomClient;
+  try {
+    access = authenticateMcp(req.headers.authorization, process.env.MCP_AUTH_GRANTS);
+    if (!access) {
+      res.setHeader('WWW-Authenticate', 'Bearer realm="Agent Room MCP"');
+      res.status(401).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Bearer token required' }, id: null });
+      return;
+    }
+    roomClient = createRemoteRoomClient(undefined);
+    if (!await withinRateLimit(roomClient.store, `mcp:${access.id}`, access.grant.requestsPerMinute ?? 60)) {
+      res.setHeader('Retry-After', String(60 - Math.floor(Date.now() / 1000) % 60));
+      res.status(429).json({ jsonrpc: '2.0', error: { code: -32000, message: 'MCP rate limit exceeded' }, id: null });
+      return;
+    }
+  } catch {
+    res.status(503).json({ jsonrpc: '2.0', error: { code: -32000, message: 'MCP service is unavailable' }, id: null });
+    return;
+  }
+
+  if (Array.isArray(req.body)) {
+    res.status(400).json({ jsonrpc: '2.0', error: { code: -32600, message: 'Send one JSON-RPC message per request' }, id: null });
+    return;
+  }
+
+  const { grant } = access;
+  const profile: McpProfile = grant.profile === 'core' || req.query.profile === 'core' ? 'core' : 'full';
 
   const server = new Server(
     { name: 'agent-room', version: '1.0.0' },
@@ -122,10 +139,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   // and leaves every unidentified client exactly as it was.
   const harnessFor = () => detectHarness(req.headers['user-agent'], server.getClientVersion()?.name);
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listTools(profile, harnessFor()) }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listTools(profile, harnessFor()).filter(tool => tool.name !== 'room_create' || grant.create) }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    return callTool(roomClient, profile, name, (args ?? {}) as Record<string, unknown>, harnessFor());
+    return callTool(roomClient, profile, name, (args ?? {}) as Record<string, unknown>, harnessFor(), grant);
   });
 
   const transport = new StreamableHTTPServerTransport({
@@ -144,11 +161,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   try {
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
-  } catch (error) {
+  } catch {
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: '2.0',
-        error: { code: -32603, message: error instanceof Error ? error.message : 'Internal server error' },
+        error: { code: -32603, message: 'Internal server error' },
         id: null,
       });
     }

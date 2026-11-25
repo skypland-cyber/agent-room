@@ -2,6 +2,7 @@
 // Called from Room.tsx handleEndMeeting() so attachments don't outlive
 // the meeting, per Robin's "结束会议时清掉附件". Idempotent.
 
+import { assertHostFor, createRemoteRoomClient, RemoteRoomApiError } from './_mcpRoomClient.js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 
@@ -51,10 +52,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const body = (req.body ?? {}) as { roomCode?: unknown };
+  const body = (req.body ?? {}) as { roomCode?: unknown; hostKey?: unknown };
   const roomCode = body.roomCode;
   if (typeof roomCode !== 'string' || !/^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/.test(roomCode)) {
     res.status(400).json({ error: 'bad_room_code', message: 'Missing or malformed roomCode.' });
+    return;
+  }
+
+  try {
+    const { store } = createRemoteRoomClient(undefined);
+    await assertHostFor(store, roomCode, typeof body.hostKey === 'string' ? body.hostKey : undefined);
+  } catch (error) {
+    const status = error instanceof RemoteRoomApiError ? error.status : 503;
+    res.status(status).json({ error: 'room_authorization_failed' });
     return;
   }
 

@@ -9,10 +9,11 @@
 // no analogous gate and gives us zero egress as a bonus. R2 is S3-
 // compatible, so we use @aws-sdk/client-s3 with a custom endpoint.
 //
-// Authorization: anyone with the room code can upload (matches the read
-// model — anyone with the code can join). The roomCode prefix in the
-// object key lets us batch-delete by room when the meeting ends.
+// Uploads require an active browser seat in the target room.
 
+import { createRemoteRoomClient } from './_mcpRoomClient.js';
+import { findSeat } from './_roomAccess.js';
+import { getRoom, RoomNotFoundError } from '@agent-room/upstash-client';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { randomUUID } from 'node:crypto';
@@ -129,6 +130,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const roomCode = roomCodePart ? roomCodePart.data.toString('utf8') : '';
   if (!/^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/.test(roomCode)) {
     res.status(400).json({ error: 'bad_room_code', message: 'Missing or malformed roomCode.' });
+    return;
+  }
+
+  try {
+    const { store } = createRemoteRoomClient(undefined);
+    const room = await getRoom(store, roomCode);
+    const seatKey = /^Bearer ([a-f0-9]{64})$/i.exec(String(req.headers.authorization ?? ''))?.[1];
+    const seat = findSeat(room, 'web', seatKey);
+    if (!seat || seat.canSpeak === false || room.status !== 'active') {
+      res.status(403).json({ error: 'room_authorization_failed', message: 'Join an active room before uploading.' });
+      return;
+    }
+  } catch (error) {
+    res.status(error instanceof RoomNotFoundError ? 404 : 503).json({ error: 'room_authorization_failed' });
     return;
   }
 

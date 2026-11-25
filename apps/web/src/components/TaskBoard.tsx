@@ -9,7 +9,7 @@ import {
   resumeTask,
   updateTask,
   verifyTask,
-} from '@agent-room/upstash-client';
+} from '../lib/roomApi.js';
 import type { useTaskBoard } from '../hooks/useTaskBoard.js';
 import { TaskTimeline } from './TaskTimeline.js';
 

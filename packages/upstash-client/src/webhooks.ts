@@ -95,7 +95,7 @@ export async function registerRoomWebhook(
   const hooks = await listRoomWebhooks(client, code);
   const existing = hooks.find(h => h.url === input.url);
   if (existing) {
-    existing.registeredBy = input.registeredBy;
+    if (existing.registeredBy !== input.registeredBy) throw new NotParticipantError(input.registeredBy);
     existing.secret = input.secret;
     existing.failCount = 0;
     await saveRoomWebhooks(client, code, hooks, room.createdAt);
@@ -119,10 +119,11 @@ export async function unregisterRoomWebhook(
   client: UpstashClient,
   code: string,
   idOrUrl: string,
+  registeredBy?: string,
 ): Promise<boolean> {
   const room = await getRoom(client, code);
   const hooks = await listRoomWebhooks(client, code);
-  const next = hooks.filter(h => h.id !== idOrUrl && h.url !== idOrUrl);
+  const next = hooks.filter(h => (h.id !== idOrUrl && h.url !== idOrUrl) || (registeredBy !== undefined && h.registeredBy !== registeredBy));
   if (next.length === hooks.length) return false;
   await saveRoomWebhooks(client, code, next, room.createdAt);
   return true;

@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { artifactLabel, extractArtifacts, normalizeEscapedWhitespace, type ArtifactKind, type Message, type RoomArtifact, type RoomReport } from '@agent-room/shared';
-import { createClient, createRoomReport, getRoom, getRoomReport, listMessages } from '@agent-room/upstash-client';
-import { ENV } from '../env.js';
+import { createClient, createRoomReport, getRoomReport, roomProof } from '../lib/roomApi.js';
 
 export function Report() {
   const { code = '' } = useParams();
@@ -12,7 +11,7 @@ export function Report() {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    const client = createClient(ENV.upstash);
+    const client = createClient();
     getRoomReport(client, code)
       .then(found => {
         setReport(found);
@@ -25,10 +24,8 @@ export function Report() {
     setRefreshing(true);
     setError(null);
     try {
-      const client = createClient(ENV.upstash);
-      const room = await getRoom(client, code);
-      const messages = await listMessages(client, code, 0);
-      const next = await createRoomReport(client, room, messages);
+      const client = createClient();
+      const next = await createRoomReport(client, code);
       setReport(next);
       setMissing(false);
     } catch (e) {
@@ -66,13 +63,13 @@ export function Report() {
             <span>Exported {new Date(report.exportedAt).toLocaleString()}</span>
           </div>
           <div className="mt-6 flex flex-wrap gap-3">
-            <button
+            {roomProof(code).hostKey && roomProof(code).seatKey && <button
               onClick={refreshReport}
               disabled={refreshing}
               className="rounded-lg bg-white text-slate-950 px-4 py-2 text-xs font-semibold disabled:opacity-60"
             >
               {refreshing ? 'Refreshing…' : 'Refresh from latest'}
-            </button>
+            </button>}
             <button
               onClick={() => downloadMarkdown(report, artifacts)}
               className="rounded-lg border border-white/25 bg-white/5 px-4 py-2 text-xs font-semibold text-white hover:bg-white/10"

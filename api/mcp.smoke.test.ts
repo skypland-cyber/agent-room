@@ -12,11 +12,23 @@
 // talking to itself.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { parse as parseUrl } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+const TOKEN = 'smoke-host-token-with-at-least-32-characters';
+const SCOPED_TOKEN = 'smoke-room-token-with-at-least-32-characters';
+const LIMITED_TOKEN = 'smoke-rate-token-with-at-least-32-characters';
+const hash = (token: string) => createHash('sha256').update(token).digest('hex');
+const SCOPED_CODE = 'ABC-DEF-GHJ';
+process.env.MCP_AUTH_GRANTS = JSON.stringify({
+  [hash(TOKEN)]: { rooms: '*', create: true },
+  [hash(SCOPED_TOKEN)]: { rooms: [SCOPED_CODE], profile: 'core' },
+  [hash(LIMITED_TOKEN)]: { rooms: [], requestsPerMinute: 1 },
+});
 
 const REDIS_BASE = 'https://smoke.upstash.invalid';
 process.env.UPSTASH_REDIS_REST_URL = REDIS_BASE;
@@ -32,7 +44,10 @@ function installFakeRedis(): void {
     const [op, key] = [String(cmd[0]).toUpperCase(), String(cmd[1])];
     switch (op) {
       case 'GET': return kv.has(key) ? kv.get(key) : null;
-      case 'SET': kv.set(key, String(cmd[2])); return 'OK';
+      case 'SET':
+        if (cmd.includes('NX') && kv.has(key)) return null;
+        kv.set(key, String(cmd[2]));
+        return 'OK';
       case 'DEL': return kv.delete(key) ? 1 : 0;
       case 'INCR': {
         const next = Number(kv.get(key) ?? 0) + 1;
@@ -59,6 +74,7 @@ function installFakeRedis(): void {
       case 'EVAL': {
         // The CAS script: EVAL <src> 1 <key> <'absent'|'present'> <expected> <next> [ttl]
         const evalKey = String(cmd[3]);
+        if (evalKey.startsWith('agent-room:rate:')) return run(['INCR', evalKey]);
         const mode = String(cmd[4]);
         const expected = cmd[5] === undefined ? undefined : String(cmd[5]);
         const next = String(cmd[6]);
@@ -89,6 +105,7 @@ const clients: Client[] = [];
 beforeAll(async () => {
   installFakeRedis();
   const mcpHandler = (await import('./mcp.js')).default;
+  const roomHandler = (await import('./room.js')).default;
 
   server = http.createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -106,6 +123,7 @@ beforeAll(async () => {
       send(data: string) { res.end(data); return vres; },
     });
     if (pathname === '/mcp') return void await mcpHandler(vreq as never, vres as never);
+    if (pathname === '/api/room') return void await roomHandler(vreq as never, vres as never);
     vres.status(404).json({ error: 'not_found' });
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -117,23 +135,62 @@ afterAll(async () => {
   await new Promise<void>(r => server.close(() => r()));
 });
 
-async function connect(asClient?: string): Promise<Client> {
+async function connect(asClient?: string, token = TOKEN): Promise<Client> {
   const url = new URL(`http://127.0.0.1:${port}/mcp`);
   const client = new Client({ name: asClient ?? 'smoke-test', version: '0.0.0' });
   await client.connect(new StreamableHTTPClientTransport(
     url,
-    asClient ? { requestInit: { headers: { 'user-agent': `${asClient}/1.0` } } } : undefined,
+    { requestInit: { headers: { Authorization: `Bearer ${token}`, ...(asClient && { 'user-agent': `${asClient}/1.0` }) } } },
   ));
   clients.push(client);
   return client;
 }
 
-function parsed(r: { content?: unknown }): Record<string, any> {
+function parsed(r: Record<string, unknown>): Record<string, any> {
   const content = r.content as { type: string; text: string }[];
   return JSON.parse(content[0]!.text);
 }
 
 describe('hosted MCP endpoint', () => {
+  it('rejects invalid credentials, unauthorized room scopes and excess requests', async () => {
+    const request = (token?: string) => fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        ...(token && { Authorization: `Bearer ${token}` }),
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    });
+    expect((await request()).status).toBe(401);
+    expect((await request('unrecognized-token-with-at-least-32-characters')).status).toBe(401);
+    expect((await request(LIMITED_TOKEN)).status).toBe(200);
+    const limited = await request(LIMITED_TOKEN);
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0);
+
+    const mcp = await connect(undefined, SCOPED_TOKEN);
+    const tools = (await mcp.listTools()).tools.map(t => t.name);
+    expect(tools).not.toContain('room_create');
+    expect(tools).not.toContain('room_task');
+    expect(parsed(await mcp.callTool({ name: 'room_join', arguments: {
+      code: 'ABC-DEF-GHK', name: 'Guest',
+    } })).error).toBe('access_denied');
+  });
+
+  it('allows only the authenticated seat to speak and only the key holder to end a room', async () => {
+    const mcp = await connect();
+    const call = async (name: string, args: Record<string, unknown>) =>
+      parsed(await mcp.callTool({ name, arguments: args }));
+    const { code, hostKey, seatKey } = await call('room_create', { topic: 'Host proof', name: 'Host' });
+    expect((await call('room_join', { code, name: 'host' })).error).toBe('host_name_taken');
+    const guest = await call('room_join', { code, name: 'Guest' });
+    expect((await call('room_send', { code, name: 'Host', seatKey: guest.seatKey, text: 'forged' })).error).toBe('seat_required');
+    expect((await call('room_end', { code, name: 'Host', seatKey })).error).toBe('not_host');
+    expect((await call('room_end', { code, name: 'Host', hostKey: 'wrong' })).error).toBe('not_host');
+    expect((await call('room_end', { code, hostKey })).ended).toBe(true);
+  });
+
   it('serves the ten-tool surface, without the hosted-only two', async () => {
     const mcp = await connect();
     const tools = (await mcp.listTools()).tools.map(t => t.name);
@@ -158,8 +215,6 @@ describe('hosted MCP endpoint', () => {
     const created = parsed(await mcp.callTool({
       name: 'room_create', arguments: { topic: 'smoke probe', name: 'Host' },
     }));
-    // No account gate here — creating a room needs no sign-in on this
-    // deployment, which is the point of stripping the hosted auth layer.
     expect(created.code).toMatch(/^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/);
     expect(typeof created.hostKey).toBe('string');
     const code = created.code as string;
@@ -171,12 +226,12 @@ describe('hosted MCP endpoint', () => {
     expect(joined.participants.map((p: { name: string }) => p.name)).toContain('Host');
 
     const sent = parsed(await mcp.callTool({
-      name: 'room_send', arguments: { code, name: 'Guest', text: 'hello over http' },
+      name: 'room_send', arguments: { code, name: 'Guest', seatKey: joined.seatKey, text: 'hello over http' },
     }));
     expect(sent.sent).toBe(true);
 
     const listed = parsed(await mcp.callTool({
-      name: 'room_listen', arguments: { code, since: 0, name: 'Guest', timeoutMs: 0 },
+      name: 'room_listen', arguments: { code, since: 0, name: 'Guest', seatKey: joined.seatKey, timeoutMs: 0 },
     }));
     expect(listed.messages.some((m: { text: string }) => m.text === 'hello over http')).toBe(true);
     // The listen loop contract rides on every result; without it an agent has
@@ -192,10 +247,10 @@ describe('hosted MCP endpoint', () => {
       name: 'room_create', arguments: { topic: 'policy probe', name: 'Host' },
     }));
     const code = created.code as string;
-    parsed(await mcp.callTool({ name: 'room_send', arguments: { code, name: 'Host', text: 'first' } }));
+    parsed(await mcp.callTool({ name: 'room_send', arguments: { code, name: 'Host', seatKey: created.seatKey, text: 'first' } }));
 
     const listed = parsed(await mcp.callTool({
-      name: 'room_listen', arguments: { code, since: 0, name: 'Host', timeoutMs: 0 },
+      name: 'room_listen', arguments: { code, since: 0, name: 'Host', seatKey: created.seatKey, timeoutMs: 0 },
     }));
     // room_listen returns history without a policy brief; the board-carrying
     // fields are what matter here — policy rides on blocking listens.
@@ -223,9 +278,9 @@ describe('hosted MCP endpoint', () => {
     // POST chat content at cloud metadata.
     for (const url of ['http://169.254.169.254/latest/meta-data/', 'https://localhost/hook', 'https://127.0.0.1/hook']) {
       const res = parsed(await mcp.callTool({
-        name: 'room_webhook', arguments: { code, name: 'Host', action: 'register', url },
+        name: 'room_webhook', arguments: { code, name: 'Host', seatKey: created.seatKey, action: 'register', url },
       }));
-      expect(res.registered).toBeFalsy();
+      expect(res.error).toBe('bad_request');
     }
 
     const listed = parsed(await mcp.callTool({
@@ -233,4 +288,43 @@ describe('hosted MCP endpoint', () => {
     }));
     expect(listed.webhooks ?? []).toHaveLength(0);
   }, 20_000);
+});
+
+describe('browser room endpoint', () => {
+  it('creates, joins, sends and exports with room-scoped credentials', async () => {
+    const code = SCOPED_CODE;
+    const roomCall = async (action: string, args: unknown[] = [], proof: Record<string, unknown> = {}) => {
+      const response = await fetch(`http://127.0.0.1:${port}/api/room`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, code, args, ...proof }),
+      });
+      return { status: response.status, body: await response.json() };
+    };
+    const created = await roomCall('createRoom', [{ topic: 'Browser meeting', createdBy: 'Host' }]);
+    expect(created.status).toBe(200);
+    const { hostKey } = created.body.result;
+    expect(created.body.result).not.toHaveProperty('hostKeyHash');
+    expect((await roomCall('createRoom', [{ topic: 'Overwrite', createdBy: 'Guest' }])).status).toBe(409);
+    expect((await roomCall('joinRoom', [{ name: 'hOsT' }])).status).toBe(403);
+
+    const host = await roomCall('joinRoom', [{ name: 'Host' }], { hostKey });
+    const guest = await roomCall('joinRoom', [{ name: 'Guest' }]);
+    const guestKey = guest.body.result.seatKey;
+    const hostProof = { hostKey, seatKey: host.body.result.seatKey };
+    const guestProof = { seatKey: guestKey };
+    expect(guest.body.result.participant).not.toHaveProperty('seatKeyHash');
+    expect((await roomCall('joinRoom', [{ name: 'Guest' }], guestProof)).body.result.seatKey).toBe(guestKey);
+    expect((await roomCall('joinRoom', [{ name: 'Guest' }])).body.result.participant.name).not.toBe('Guest');
+    expect((await roomCall('endRoom', [], { ...guestProof, hostKey: 'wrong' })).status).toBe(403);
+    expect((await roomCall('listMessages', [0])).status).toBe(403);
+    expect((await roomCall('appendMessage', [{ name: 'Host', type: 'sys', text: 'hello' }], guestProof)).status).toBe(200);
+
+    const transcript = (await roomCall('listMessages', [0], guestProof)).body.result;
+    expect(transcript).toEqual([expect.objectContaining({ name: 'Guest', type: 'msg', text: 'hello' })]);
+    expect((await roomCall('createRoomReport', [], hostProof)).body.result.messageCount).toBe(1);
+    expect((await roomCall('getRoomReport')).body.result.messageCount).toBe(1);
+    expect((await roomCall('endRoom', [], hostProof)).body.result.status).toBe('ended');
+    expect((await roomCall('reactivateRoom', [], hostProof)).body.result.status).toBe('active');
+  });
 });

@@ -55,8 +55,8 @@ async function getRoomReportRaw(
 }
 
 function readUpstashEnv(): { url: string; token: string } | { missing: string[] } {
-  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.VITE_UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.VITE_UPSTASH_REDIS_REST_TOKEN;
+  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
   const missing = [
     !url ? 'UPSTASH_REDIS_REST_URL' : '',
     !token ? 'UPSTASH_REDIS_REST_TOKEN' : '',

@@ -142,13 +142,7 @@ graph LR
 
 ## Get started in 30 seconds
 
-**Zero-install** — Agent Room is a hosted MCP server. One command in Claude Code:
-
-```bash
-claude mcp add --transport http agent-room https://www.agent-room.com/mcp
-```
-
-…or paste `https://www.agent-room.com/mcp` into any MCP client that takes a remote server URL (claude.ai connectors, Cursor, OpenClaw, …). No Node, no config files.
+**Hosted MCP** — connect a Streamable HTTP client with a bearer token issued by the deployment administrator. Setup and permission scopes are in the [installation guide](INSTALL.md#ai-agent--hosted-mcp).
 
 **Full local install** (adds autonomous-chat hooks + file attachments):
 
