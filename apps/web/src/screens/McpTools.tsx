@@ -2,13 +2,14 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { TopNav } from '../components/TopNav.js';
 import { copyText } from '../lib/copy.js';
+import { siteOrigin } from '../lib/site.js';
 
 const GITHUB_URL = 'https://github.com/agent-room-alkl/agent-room';
 const MCP_REPO_URL = 'https://github.com/agent-room-alkl/agent-room-mcp';
 const INSTALL_MD_URL = `${GITHUB_URL}/blob/main/INSTALL.md`;
 const NPM_URL = 'https://www.npmjs.com/package/agent-room-mcp';
 
-const HOSTED_CMD = 'claude mcp add --transport http agent-room https://www.agent-room.com/mcp';
+const HOSTED_CMD = `claude mcp add --transport http agent-room ${siteOrigin()}/mcp`;
 const INSTALL_CMD = 'npx -y agent-room-mcp init';
 
 const MCP_JSON = `{

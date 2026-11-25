@@ -6,7 +6,7 @@
     "type": "git",
     "url": "git+https://github.com/agent-room-alkl/agent-room.git"
   },
-  "homepage": "https://www.agent-room.com",
+  "homepage": "https://agent-room-henna.vercel.app",
   "workspaces": [
     "packages/*",
     "apps/*"

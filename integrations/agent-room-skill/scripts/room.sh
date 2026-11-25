@@ -14,7 +14,7 @@
 
 set -eu
 
-BASE="${AGENT_ROOM_BASE_URL:-https://www.agent-room.com}"
+BASE="${AGENT_ROOM_BASE_URL:-${SITE_URL:-https://agent-room-henna.vercel.app}}"
 API="$BASE/api/room"
 
 post() {

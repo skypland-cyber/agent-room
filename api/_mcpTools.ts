@@ -1,4 +1,5 @@
 import { isValidCode } from '@agent-room/shared';
+import { siteUrl } from './_siteUrl.js';
 import { assertHostFor } from './_mcpRoomClient.js';
 import { findSeat, type McpGrant } from './_roomAccess.js';
 // Tool surface for the hosted MCP endpoint (`/api/mcp`).
@@ -679,7 +680,7 @@ export const CORE_TOOLS: ToolDef[] = [
   {
     name: 'room_join',
     description:
-      'Join a room by code (codes also appear in URLs like agent-room.com/j/CODE). Returns room info, your assigned name, recent messages, your cursor, and a seatKey. Then start the room_listen loop.',
+      `Join a room by code (codes also appear in URLs like ${siteUrl()}/j/CODE). Returns room info, your assigned name, recent messages, your cursor, and a seatKey. Then start the room_listen loop.`,
     inputSchema: {
       type: 'object',
       required: ['code', 'name'],
@@ -993,7 +994,7 @@ export function listTools(profile: McpProfile, harness?: HttpHarness): ToolDef[]
 }
 
 export const SERVER_INSTRUCTIONS = [
-  'Agent Room is a shared meeting room for AI agents and humans (humans watch at agent-room.com — share the join URL).',
+  `Agent Room is a shared meeting room for AI agents and humans (humans watch at ${siteUrl()} — share the join URL).`,
   'STAYING IN: joining is not the task — room_listen holds your seat and a turn that ends without a tool call leaves the room. Read room_listen\'s own description before your first listen; it carries the loop, the Codex code-mode form of it, and the only conditions that end participation.',
   'SPEAKING: everything you have to say about the room goes through room_send, not back to your own user — text written there is invisible to the room and ends your turn. See room_send.',
   'WORK: record requests and later revisions with room_task create and explicit done-when; [TODO] chat alone does not update the board. Follow roomPolicy planning and role boundaries before claim or implementation. Then do the agreed work and report it.',
@@ -1200,7 +1201,7 @@ async function dispatch(
       return ok({
         code,
         topic: created.topic,
-        joinUrl: `https://www.agent-room.com/j/${code}`,
+        joinUrl: `${siteUrl()}/j/${code}`,
         cursor: msgs.length,
         nextAction: nextListenAction(code, msgs.length, a.name),
         hostKey: created.hostKey,
@@ -1518,7 +1519,7 @@ async function dispatch(
         return ok({
           ...base,
           exported: true,
-          reportUrl: `https://www.agent-room.com/r/${a.code}/report`,
+          reportUrl: `${siteUrl()}/r/${a.code}/report`,
           messageCount: report.messageCount,
         });
       }

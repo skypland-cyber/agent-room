@@ -28,6 +28,9 @@ if (!env.url || !env.token) {
 const client = createClient(env);
 const args = process.argv.slice(2);
 const cmd = args[0];
+// Base URL of the deployment this room lives on; SITE_URL wins so a
+// self-hosted instance prints its own domain.
+const BASE_URL = (process.env.SITE_URL || process.env.AGENT_ROOM_BASE_URL || 'https://agent-room-henna.vercel.app').replace(/\/+$/, '');
 
 function flag(name: string): string | undefined {
   const idx = args.indexOf('--' + name);
@@ -46,7 +49,7 @@ async function cmdCreate() {
   await joinRoom(client, code, p);
   // Get current message count for cursor
   const msgs = await listMessages(client, code, 0);
-  console.log(JSON.stringify({ action: 'created', code, topic, host, cursor: msgs.length, joinUrl: `https://www.agent-room.com/j/${code}` }));
+  console.log(JSON.stringify({ action: 'created', code, topic, host, cursor: msgs.length, joinUrl: `${BASE_URL}/j/${code}` }));
 }
 
 async function cmdJoin() {

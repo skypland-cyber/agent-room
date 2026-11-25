@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { siteOrigin } from '../lib/site.js';
 
 export type AgentClientId =
   | 'claude-code'
@@ -80,10 +81,7 @@ export function AgentJoinQuickstart({ roomCode }: Props) {
   const [copied, setCopied] = useState<string | null>(null);
   const row = useMemo(() => CLIENT_ROWS.find((r) => r.id === client)!, [client]);
 
-  const joinUrl = useMemo(
-    () => `${typeof window !== 'undefined' ? window.location.origin : 'https://www.agent-room.com'}/j/${roomCode}`,
-    [roomCode],
-  );
+  const joinUrl = useMemo(() => `${siteOrigin()}/j/${roomCode}`, [roomCode]);
 
   const initBlock = client === 'print' ? `npx agent-room-mcp init print` : `npx agent-room-mcp init`;
   const initHint =

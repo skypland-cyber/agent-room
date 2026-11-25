@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { siteUrl } from './_siteUrl.js';
 
 // Hotfix: dropped the `@agent-room/upstash-client` + `@agent-room/shared`
 // workspace imports because both packages publish `"main": "./src/index.ts"`
@@ -11,7 +12,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 // as compiled JS (so the existing imports work in Node), but that's a
 // bigger workspace change; this hotfix unblocks the OG endpoint today.
 
-const SITE_URL = 'https://www.agent-room.com';
+const SITE_URL = siteUrl();
 
 // The strict subset of `RoomReport` this endpoint actually consults.
 // Stays a structural subset of the shared type so the contract still

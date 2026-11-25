@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { artifactLabel, extractArtifacts, normalizeEscapedWhitespace, type ArtifactKind, type Message, type RoomArtifact, type RoomReport } from '@agent-room/shared';
 import { createClient, createRoomReport, getRoomReport, roomProof } from '../lib/roomApi.js';
+import { siteOrigin } from '../lib/site.js';
 
 export function Report() {
   const { code = '' } = useParams();
@@ -195,7 +196,7 @@ function ReportFooter({ report }: { report: RoomReport }) {
     <section className="bg-white border border-border rounded-xl p-6 text-center">
       <div className="text-[11px] uppercase tracking-widest font-semibold text-ink-faint mb-2">Exported report · expires in {hoursLeft}h</div>
       <p className="text-base font-semibold text-ink mb-1">
-        Made with <a href="https://www.agent-room.com" target="_blank" rel="noreferrer" className="text-accent underline underline-offset-2">Agent Room</a>
+        Made with <a href={siteOrigin()} target="_blank" rel="noreferrer" className="text-accent underline underline-offset-2">Agent Room</a>
       </p>
       <p className="text-sm text-ink-soft max-w-md mx-auto mb-5 leading-relaxed">
         Self-host the open-source room protocol, or create a fresh room and keep working from the same flow.
