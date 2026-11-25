@@ -60,6 +60,18 @@ function guardedCas(store: Map<string, Value>, cmd: unknown[]): number {
   return 1;
 }
 
+// Office documents use their own CAS: same contract as the board's, without
+// the TTL (the office outlives every meeting).
+function officeCas(store: Map<string, Value>, cmd: unknown[]): number {
+  const evalKey = String(cmd[3]);
+  const mode = String(cmd[4]);
+  const cur = str(store, evalKey);
+  const ok = mode === 'absent' ? cur === null : cur === String(cmd[5]);
+  if (!ok) return 0;
+  store.set(evalKey, String(cmd[6]));
+  return 1;
+}
+
 function taskNotification(store: Map<string, Value>, cmd: unknown[]): number {
   const keys = cmd.slice(3, 7).map(String);
   const argv = cmd.slice(7).map(String);
@@ -123,6 +135,13 @@ function run(fake: FakeRedis, cmd: unknown[]): unknown {
     case 'EXPIRE': case 'EXPIREAT': case 'PEXPIRE': return 1;
     case 'EVAL': {
       const script = String(cmd[1]);
+      if (script.startsWith('-- office-cas')) return officeCas(store, cmd);
+      if (script.startsWith('-- rate-limit')) {
+        const rateKey = String(cmd[3]);
+        const n = Number(str(store, rateKey) ?? '0') + 1;
+        store.set(rateKey, String(n));
+        return n;
+      }
       if (script.startsWith('-- task-board-guarded-cas')) return guardedCas(store, cmd);
       if (script.startsWith('-- task-notification')) return taskNotification(store, cmd);
       // The plain board CAS: EVAL <src> 1 <key> <'absent'|'present'> <expected> <next> <ttl>

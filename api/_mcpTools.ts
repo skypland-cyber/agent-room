@@ -1,5 +1,6 @@
 import { isValidCode } from '@agent-room/shared';
 import { siteUrl } from './_siteUrl.js';
+import { OfficeApiError, assertAgentCapacity, noteAgentTask } from './_office.js';
 import { assertHostFor } from './_mcpRoomClient.js';
 import { findSeat, type McpGrant } from './_roomAccess.js';
 // Tool surface for the hosted MCP endpoint (`/api/mcp`).
@@ -38,7 +39,7 @@ import {
   AGENT_ROOM_CODEX_CONTINUE,
 } from '@agent-room/shared';
 import type { ClientKind, Message, Participant, Room, TaskBoard, Task, TaskInbox } from '@agent-room/shared';
-import { buildRoomRetro, isConfiguredModerator } from '@agent-room/upstash-client';
+import { buildRoomRetro, isConfiguredModerator, recordAgentHeartbeat } from '@agent-room/upstash-client';
 import type { TaskBoard as RetroBoard } from '@agent-room/shared';
 import {
   appendMessage,
@@ -872,13 +873,14 @@ export const FULL_TOOLS: ToolDef[] = [
         'Record requested work yourself with create, then follow roomPolicy planning and role boundaries before claiming and executing it — do not ask the room to "assign it formally" first. If the request is one you cannot do, answer that in the room; silence is never the reply to a direct request.',
         'When work needs a known repository, workspace or tools, declare requirements.owner/review and report actual capabilities with room_task capabilities; unknown access stays unknown. The board is the source of truth. Real work gets a task; a task is done only when its VERIFIER rules done, never because the owner says so — so verify by re-doing the check yourself: re-run the command, or open the artifact and walk the done-when criteria. Reading the output the owner pasted is not verifying. If input or artifact access is missing, call room_task wait with scope owner or review, reasonCode, reason and resumeWhen; keep room_listen while waiting. Resume with room_task resume and a resolution after the condition is met. Do not reject its quality without inspecting it. Reassign the verifier to a capable seated agent when appropriate. Before reporting a follow-up complete, create a revision task unless an existing open task already covers its acceptance criteria; name the task id. [TODO] text alone does not update the board.',
         'room_join and room_listen return yourTasks when the board is holding something for you. That is the only way to find out after being away, because board events are posted into the transcript and a transcript reaches whoever was present at the time.',
+        'Office controls: a task with requiresApproval waits in pending_approval until the boss approves it — do not work around it. pause freezes a task without losing evidence; unpause returns it to where it was. qa is a peer quality check separate from the verdict, and only a non-owner agent may record it. abort is the boss stopping work for good; agents cannot call it.',
       ].join('\n'),
     inputSchema: {
       type: 'object',
       required: ['code', 'action'],
       properties: {
         code: CODE_PROP,
-        action: { type: 'string', enum: ['list', 'history', 'create', 'update', 'claim', 'submit', 'verify', 'reassign', 'cancel', 'wait', 'block', 'resume', 'ack', 'review_start', 'capabilities', 'renew', 'recover', 'release', 'handoff'], description: 'What to do. history reads retained task events (normal replies omit full timelines). claim starts a fenced execution; renew before expiry, recover after reading history, handoff to another agent. wait/block declares missing input; resume releases a wait. ack/review_start confirms receipt/start of a review. capabilities reports current context (agent-declared).' },
+        action: { type: 'string', enum: ['list', 'history', 'create', 'update', 'claim', 'submit', 'verify', 'reassign', 'cancel', 'wait', 'block', 'resume', 'ack', 'review_start', 'capabilities', 'renew', 'recover', 'release', 'handoff', 'pause', 'unpause', 'abort', 'qa', 'request_approval'], description: 'What to do. history reads retained task events (normal replies omit full timelines). claim starts a fenced execution; renew before expiry, recover after reading history, handoff to another agent. wait/block declares missing input; resume releases a wait. ack/review_start confirms receipt/start of a review. capabilities reports current context (agent-declared). pause/unpause suspends and resumes work; abort stops it for good (host only); qa records an independent quality check; request_approval puts an unstarted task behind the boss\'s gate.' },
         name: { type: 'string', description: 'Your display name (required for everything except list/history)' },
         seatKey: { type: 'string', description: 'Private seat key returned by room_join — the seat proof for claim/submit/verify/wait/resume/renew/recover/release/handoff/ack/capabilities. Never send it in chat.' },
         attemptId: { type: 'string', description: 'Current execution token returned by claim/recover; required on submit/renew/release/handoff.' },
@@ -902,6 +904,7 @@ export const FULL_TOOLS: ToolDef[] = [
         owner: { type: 'string', description: 'create/reassign: producer display name' },
         verifier: { type: 'string', description: 'create/reassign: independent reviewer, must differ from owner. Optional: on submission the server assigns an available non-owner agent, or records that the task is waiting for one. A human named here rules from the board UI, not through this tool.' },
         dod: { type: 'string', description: 'create: definition of done / acceptance criteria' },
+        requiresApproval: { type: 'boolean', description: 'create: the boss must approve this task before any agent may claim it (it waits in pending_approval).' },
         fileListing: { type: 'string', description: 'submit: real directory listing proving files exist' },
         fileExcerpt: { type: 'string', description: 'submit: real excerpt of the key file' },
         runOutput: { type: 'string', description: 'submit: real stdout of the test / smoke run' },
@@ -911,7 +914,9 @@ export const FULL_TOOLS: ToolDef[] = [
         inputFileIds: { type: 'array', items: { type: 'string' }, description: 'submit: vault ids of the materials this work used, so the board records what the work was based on.' },
         verdict: { type: 'string', enum: ['done', 'rejected'], description: 'verify: your ruling' },
         note: { type: 'string', description: 'verify: reasoning / what to fix (optional)' },
-        reason: { type: 'string', description: 'wait/block: required description of the missing input. cancel: optional archive reason.' },
+        reason: { type: 'string', description: 'wait/block: required description of the missing input. cancel: optional archive reason. pause/abort/qa/retry: why.' },
+        status: { type: 'string', enum: ['pending', 'passed', 'failed'], description: 'qa: the quality verdict (pending = a QA pass is owed).' },
+        notes: { type: 'string', description: 'qa: what you checked and what you found.' },
       },
     },
   },
@@ -1355,6 +1360,9 @@ async function dispatch(
         seatKey: typeof a.seatKey === 'string' && a.seatKey ? a.seatKey : undefined,
       });
       const finalName = updated.participant.name;
+      // Office presence: a join is the first heartbeat of a session.
+      void recordAgentHeartbeat(client.store, { name: finalName, roomCode: a.code, at: Date.now() })
+        .catch(() => ({ recorded: false }));
       const myEntry = updated.participants.find(p => p.name === finalName && p.client === 'cc');
       const muted = myEntry?.canSpeak === false;
       if (!reconnecting && !muted) {
@@ -1484,6 +1492,12 @@ async function dispatch(
     case 'room_listen': {
       const since = typeof a.since === 'number' ? a.since : 0;
       const selfName = typeof a.name === 'string' && a.name.trim() ? a.name.trim() : undefined;
+      // Presence for the office dashboard. Throttled inside the store (one write
+      // per 30s per name), so a fast listen loop costs one read, not one write.
+      if (selfName) {
+        void recordAgentHeartbeat(client.store, { name: selfName, roomCode: a.code, at: Date.now() })
+          .catch(() => ({ recorded: false }));
+      }
       // timeoutMs: 0 → non-blocking history read (the old room_list_messages).
       if (a.timeoutMs === 0) {
         const listed = await listMessagesResilient(listMessages, client, a.code, since);
@@ -1704,6 +1718,49 @@ async function dispatch(
             ...(a.requirements !== undefined ? { requirements: a.requirements } : {}) });
           return ok({ task: body.task, board: body.board });
         }
+        case 'pause':
+        case 'unpause': {
+          const err = requireFields(a, ['name', 'id']);
+          if (err) return ok({ error: 'bad_request', hint: err });
+          const body = await client.post<{ board: TaskBoard; task: Task }>({
+            action: a.action === 'pause' ? 'taskPause' : 'taskUnpause',
+            code: a.code, id: a.id, requesterName: a.name, reason: a.reason,
+            ...(typeof a.hostKey === 'string' && a.hostKey ? { hostKey: a.hostKey } : {}),
+            ...proof,
+          });
+          return ok({ task: body.task, board: body.board,
+            hint: a.action === 'pause'
+              ? 'Paused. Nothing is lost: unpause returns the task to the state it was in. Keep listening unless told to stop.'
+              : 'Resumed. Re-read the task before continuing; the room may have moved on.' });
+        }
+        case 'abort': {
+          const err = requireFields(a, ['name', 'id', 'hostKey']);
+          if (err) return ok({ error: 'bad_request', hint: `${err} abort is the boss's stop and needs the host key.` });
+          const body = await client.post<{ board: TaskBoard; task: Task }>({
+            action: 'taskAbort', code: a.code, id: a.id, requesterName: a.name, reason: a.reason,
+            hostKey: a.hostKey,
+          });
+          return ok({ task: body.task, board: body.board, hint: 'Aborted for good. Do not start it again; create a new task if the work is still wanted.' });
+        }
+        case 'qa': {
+          const err = requireFields(a, ['name', 'id', 'status']);
+          if (err) return ok({ error: 'bad_request', hint: err });
+          const body = await client.post<{ board: TaskBoard; task: Task }>({
+            action: 'taskQa', code: a.code, id: a.id, name: a.name, status: a.status, notes: a.notes, ...proof,
+          });
+          return ok({ task: body.task, board: body.board,
+            hint: 'QA is recorded separately from the completion verdict; only a non-owner agent may run it.' });
+        }
+        case 'request_approval': {
+          const err = requireFields(a, ['name', 'id']);
+          if (err) return ok({ error: 'bad_request', hint: err });
+          const body = await client.post<{ board: TaskBoard; task: Task }>({
+            action: 'taskRequestApproval', code: a.code, id: a.id, requesterName: a.name, reason: a.reason,
+            ...(typeof a.hostKey === 'string' && a.hostKey ? { hostKey: a.hostKey } : {}),
+          });
+          return ok({ task: body.task, board: body.board, needsApproval: { taskId: body.task.id,
+            instruction: 'Waiting for the boss to approve this task. Do not start it yet; listen for the board to change.' } });
+        }
         case 'capabilities': {
           const err = requireFields(a, ['name', 'capabilities']);
           if (err) return ok({ error: 'bad_request', hint: err });
@@ -1754,6 +1811,16 @@ async function dispatch(
         case 'create': {
           const err = requireFields(a, ['name', 'title']);
           if (err) return ok({ error: 'bad_request', hint: err });
+          // Office capacity: an agent the boss registered with a daily limit
+          // cannot be handed a new task once that limit is used up. Names the
+          // office does not know pass straight through.
+          const capacityTarget = a.owner ?? a.name;
+          try {
+            await assertAgentCapacity(client.store, capacityTarget);
+          } catch (error) {
+            if (error instanceof OfficeApiError) return ok({ error: error.code, hint: error.message });
+            throw error;
+          }
           const body = await client.post<{ board: TaskBoard; task: Task }>({
             action: 'taskCreate',
             code: a.code,
@@ -1765,12 +1832,26 @@ async function dispatch(
             ...(await roleClients(client, a.code, a.owner, a.verifier)),
             ...(a.dod ? { dod: a.dod } : {}),
             ...(a.requirements ? { requirements: a.requirements } : {}),
+            ...(a.requiresApproval === true ? { requiresApproval: true } : {}),
           });
-          return ok({ task: body.task, board: body.board });
+          if (!body.task.approval) await noteAgentTask(client.store, a.owner ?? a.name);
+          return ok({
+            task: body.task,
+            board: body.board,
+            ...(body.task.state === 'pending_approval'
+              ? { needsApproval: { taskId: body.task.id, instruction: 'Waiting for the boss. Do not start this task; listen for the board to change.' } }
+              : {}),
+          });
         }
         case 'claim': {
           const err = requireFields(a, ['name', 'id']);
           if (err) return ok({ error: 'bad_request', hint: err });
+          try {
+            await assertAgentCapacity(client.store, a.name);
+          } catch (error) {
+            if (error instanceof OfficeApiError) return ok({ error: error.code, hint: error.message });
+            throw error;
+          }
           const body = await client.post<{ board: TaskBoard; task: Task }>({
             action: 'taskClaim', code: a.code, id: a.id, name: a.name, client: 'cc', ...proof,
             ...(typeof a.ttlMs === 'number' ? { ttlMs: a.ttlMs } : {}),

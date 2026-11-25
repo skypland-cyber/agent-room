@@ -13,7 +13,8 @@ export function findSeat(room: Room, client: 'web' | 'cc', key: unknown) {
 export async function withinRateLimit(store: UpstashClient, key: string, limit: number) {
   const count = await store.command<number>([
     'EVAL',
-    "local n = redis.call('INCR', KEYS[1]); if n == 1 then redis.call('EXPIRE', KEYS[1], 60) end; return n",
+    // Tagged so the in-memory test Redis can model it without executing Lua.
+    "-- rate-limit\nlocal n = redis.call('INCR', KEYS[1]); if n == 1 then redis.call('EXPIRE', KEYS[1], 60) end; return n",
     1, `agent-room:rate:${key}:${Math.floor(Date.now() / 60000)}`,
   ]);
   return Number.isSafeInteger(count) && count > 0 && count <= limit;

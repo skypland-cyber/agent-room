@@ -46,7 +46,7 @@ export function finishTaskAttempt(task: Task, status: Exclude<TaskAttempt['statu
   if (!task.execution) return task;
   const attempt = currentAttempt(task);
   const endedAt = reason === 'lease_expired' ? task.lease?.expiresAt ?? now : now;
-  return { ...task, execution: { ...task.execution, recoveryRequired: !['done', 'cancelled'].includes(task.state) && !['submitted', 'cancelled'].includes(status) },
+  return { ...task, execution: { ...task.execution, recoveryRequired: !['done', 'cancelled', 'aborted'].includes(task.state) && !['submitted', 'cancelled'].includes(status) },
     lease: task.lease ? { ...task.lease, status: reason === 'lease_expired' ? 'expired' : 'released', releasedAt: endedAt, handoff: undefined } : undefined,
     attempts: task.attempts?.map(a => a.id === attempt?.id && a.status === 'running' ? { ...a, status, endedAt, endReason: reason } : a) };
 }
@@ -54,7 +54,7 @@ export function finishTaskAttempt(task: Task, status: Exclude<TaskAttempt['statu
 export function reconcileTaskExecution(task: Task, previous: Task | undefined, now: number, currentRoomSession?: number): Task {
   if (!task.execution) return task;
   const attempt = currentAttempt(task);
-  if (['done', 'cancelled'].includes(task.state) && attempt?.status !== 'running'
+  if (['done', 'cancelled', 'aborted'].includes(task.state) && attempt?.status !== 'running'
     && (task.execution.recoveryRequired || task.execution.decisionRequired)) {
     return { ...task, execution: { ...task.execution, recoveryRequired: false, decisionRequired: false } };
   }
@@ -67,9 +67,10 @@ export function reconcileTaskExecution(task: Task, previous: Task | undefined, n
   }
   if (task.state === 'rejected' && previous?.state !== 'rejected') return finishTaskAttempt(task, 'interrupted', 'host_rejected', now);
   if (task.state === 'done') return finishTaskAttempt(task, 'interrupted', 'task_closed_by_host', now);
-  if (task.state === 'cancelled') return finishTaskAttempt(task, 'cancelled', 'task_closed', now);
+  if (task.state === 'cancelled' || task.state === 'aborted') return finishTaskAttempt(task, 'cancelled', 'task_closed', now);
   if (task.state === 'awaiting_review') return finishTaskAttempt(task, 'submitted', 'submitted_for_review', now);
   if (task.state === 'blocked') return finishTaskAttempt(task, 'waiting', 'waiting_for_input', now);
+  if (task.state === 'paused') return finishTaskAttempt(task, 'waiting', 'task_paused', now);
   if (previous?.execution?.attemptId === task.execution.attemptId
     && (previous.owner !== task.owner || previous.dod !== task.dod
       || JSON.stringify(previous.requirements?.owner) !== JSON.stringify(task.requirements?.owner))) return finishTaskAttempt(task, 'interrupted', 'assignment_or_scope_changed', now);

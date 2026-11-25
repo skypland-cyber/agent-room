@@ -391,12 +391,15 @@ export interface RoomArtifact {
 // chat rather than a distinct board state.
 export type TaskState =
   | 'todo'             // created, nobody working it yet
+  | 'pending_approval' // the boss must approve before any agent may claim it
   | 'in_progress'      // a producer claimed it
+  | 'paused'           // suspended on purpose; the work and lease are kept, not lost
   | 'awaiting_review'  // producer submitted evidence; verifier must rule
   | 'blocked'          // owner/host declared it stuck — see Task.blocked; open work
   | 'done'             // verifier confirmed the evidence
   | 'rejected'         // verifier rejected; terminal until explicitly reopened
-  | 'cancelled';       // participant archived it; terminal, visible history only
+  | 'cancelled'        // participant archived it; terminal, visible history only
+  | 'aborted';         // the boss stopped it for good; terminal, with the reason kept
 
 // The three-part proof a producer must attach to move a task to
 // 'awaiting_review'. All three text fields must be non-empty.
@@ -551,6 +554,65 @@ export interface TaskLease {
   handoff?: TaskLeaseHandoffRequest;
 }
 
+/** A pause is reversible: the task keeps its evidence, roles and place in the queue. */
+export interface TaskPause {
+  by: string;
+  byClient: ClientKind;
+  at: number;
+  reason?: string;
+  /** State the task was in when it was paused; resume returns it there. */
+  resumeState: TaskState;
+  resumedAt?: number;
+  resumedBy?: string;
+  resumedClient?: ClientKind;
+}
+
+/** Terminal stop declared by the boss; kept as history on the archived task. */
+export interface TaskAbort {
+  by: string;
+  byClient: ClientKind;
+  at: number;
+  reason?: string;
+}
+
+/**
+ * The boss's gate on important work. `requiresApproval` tasks are created in
+ * `pending_approval` and no agent may claim them until an approval is recorded;
+ * a rejection sends the task back to the owner with the note attached.
+ */
+export interface TaskApproval {
+  required: true;
+  status: 'pending' | 'approved' | 'rejected';
+  requestedBy: string;
+  requestedAt: number;
+  decidedBy?: string;
+  decidedAt?: number;
+  note?: string;
+}
+
+/**
+ * Peer quality check, separate from the completion verdict: the verifier says
+ * the evidence meets the definition of done, QA says the work is good. The two
+ * are recorded apart because folding them together lets a friendly reviewer
+ * wave a flawed deliverable through.
+ */
+export interface TaskQa {
+  reviewer: string;
+  reviewerClient: ClientKind;
+  status: 'pending' | 'passed' | 'failed';
+  notes?: string;
+  at: number;
+}
+
+/** One automatic retry or hand-off attempt after a failure. */
+export interface TaskRetry {
+  at: number;
+  reason: string;
+  from?: string;
+  to?: string;
+  attempt: number;
+}
+
 export interface TaskFiles {
   inputs?: string[];       // material ids the work started from
   deliverables?: string[]; // deliverable ids the work produced (newest last)
@@ -578,6 +640,13 @@ export interface Task {
   evidence?: TaskEvidence; // latest submitted evidence (kept across rejects)
   verdict?: TaskVerdict;   // latest verifier ruling
   cancellation?: TaskCancellation; // set when archived to 'cancelled'
+  pause?: TaskPause;       // latest pause (kept after resume as history)
+  abort?: TaskAbort;       // terminal stop declared by the boss
+  approval?: TaskApproval; // boss gate for important work
+  qa?: TaskQa;             // peer quality check (producer ≠ QA reviewer)
+  retryCount?: number;     // automatic retries already spent on this task
+  maxRetries?: number;     // retry ceiling; defaults to the board's policy
+  retries?: TaskRetry[];   // newest last, bounded
   blocked?: TaskBlock;     // latest block declaration (kept after reopen as history)
   waiting?: TaskWait;      // latest explicit wait (kept after resume as history)
   // Review assignment state, maintained by applyTaskPolicy inside the board CAS.
@@ -623,6 +692,10 @@ export interface TaskBoard {
   code: string;
   tasks: Task[];
   version: number;       // optimistic-concurrency counter
+  /** Office project this room's work belongs to (set when a template opens it). */
+  projectId?: string;
+  /** Office template that produced this board, when it was created by one. */
+  templateId?: string
   // epoch ms of the last meaningful board change (create/claim/submit/verify).
   // Used by the server's board sweep to detect a stalled board (no progress on
   // open tasks for a while) and nudge owners — distinct from `version`, which

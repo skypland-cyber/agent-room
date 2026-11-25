@@ -38,18 +38,21 @@ interface Props {
 
 const STATE_TONE: Record<TaskState, { label: string; chip: string; rail: string }> = {
   todo:            { label: 'To do',       chip: 'bg-surface-sunken text-ink-muted ring-border',            rail: 'bg-ink-faint' },
+  pending_approval:{ label: 'Needs approval', chip: 'bg-amber-50 text-amber-900 ring-amber-300',             rail: 'bg-amber-400' },
+  paused:          { label: 'Paused',      chip: 'bg-violet-50 text-violet-800 ring-violet-200',             rail: 'bg-violet-400' },
   in_progress:     { label: 'In progress', chip: 'bg-blue-50 text-blue-800 ring-blue-200',                  rail: 'bg-blue-500' },
   awaiting_review: { label: 'Needs review', chip: 'bg-amber-50 text-amber-800 ring-amber-200',              rail: 'bg-amber-500' },
   blocked:         { label: 'Blocked',     chip: 'bg-rose-50 text-rose-800 ring-rose-200',                  rail: 'bg-rose-500' },
   done:            { label: 'Done',        chip: 'bg-emerald-50 text-emerald-800 ring-emerald-200',         rail: 'bg-emerald-500' },
   rejected:        { label: 'Rejected',    chip: 'bg-rose-50 text-rose-800 ring-rose-200',                  rail: 'bg-rose-500' },
   cancelled:       { label: 'Cancelled',   chip: 'bg-surface-sunken text-ink-faint ring-border-faint',      rail: 'bg-border' },
+  aborted:         { label: 'Aborted',     chip: 'bg-surface-sunken text-ink-faint ring-border-faint',      rail: 'bg-border' },
 };
 
 // Action-first ordering: what needs the host's thumb comes before what is
 // merely running. Closed states drop below the fold entirely.
-const OPEN_ORDER: TaskState[] = ['awaiting_review', 'blocked', 'in_progress', 'todo'];
-const CLOSED: ReadonlySet<TaskState> = new Set<TaskState>(['done', 'rejected', 'cancelled']);
+const OPEN_ORDER: TaskState[] = ['pending_approval', 'awaiting_review', 'blocked', 'paused', 'in_progress', 'todo'];
+const CLOSED: ReadonlySet<TaskState> = new Set<TaskState>(['done', 'rejected', 'cancelled', 'aborted']);
 
 /** Split the board into the action-ordered open list and the closed archive. */
 export function partitionTasks(tasks: Task[]): { open: Task[]; closed: Task[] } {

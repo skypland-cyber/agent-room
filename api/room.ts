@@ -3,6 +3,7 @@ import { isValidCode, type Message } from '@agent-room/shared';
 import * as storage from '@agent-room/upstash-client';
 import { assertHostFor, createRemoteRoomClient, publishBoardNotifications, RemoteRoomApiError } from './_mcpRoomClient.js';
 import { digest, findSeat, withinRateLimit } from './_roomAccess.js';
+import { captureRoomArchive } from './_office.js';
 
 const string = (value: unknown) => typeof value === 'string' ? value : '';
 const hostOperations = new Set([
@@ -91,8 +92,13 @@ async function run(body: Record<string, unknown>, store: storage.UpstashClient) 
       }
       return storage.removeParticipant(store, code, seat.name, target, targetClient);
     }
-    case 'endRoom':
-      return storage.endRoom(store, code);
+    case 'endRoom': {
+      const ended = await storage.endRoom(store, code);
+      // Rooms expire; the minutes do not. Best-effort: ending a meeting must
+      // not fail because the office archive is unavailable.
+      await captureRoomArchive(store, code, { name: seat.name, kind: 'host' }).catch(() => undefined);
+      return ended;
+    }
     case 'reactivateRoom':
       return storage.reactivateRoom(store, code);
     case 'setReplyMode':

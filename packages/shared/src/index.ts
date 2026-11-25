@@ -18,3 +18,4 @@ export * from './agentJoinPrompt.js';
 export * from './taskExecution.js';
 export * from './taskTimeline.js';
 export * from './vault.js';
+export * from './office.js';

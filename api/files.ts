@@ -38,6 +38,7 @@ import {
   VaultRequestError,
 } from './_vault.js';
 import { createBlobStore, vaultStorageKey } from './_blobStore.js';
+import { audit } from './_office.js';
 
 export const config = { api: { bodyParser: false }, maxDuration: 60 };
 
@@ -225,6 +226,11 @@ async function handleMultipartUpload(req: VercelRequest, res: VercelResponse): P
   });
   const usage = await vaultUsage(store, roomCode);
   const status = result.files.length > 0 ? 201 : 400;
+  for (const file of result.files) {
+    await audit(store, { name: principal.name, kind: principal.isHost ? 'host' : principal.client === 'cc' ? 'agent' : 'owner' }, 'file.upload', {
+      target: file.id, roomCode, detail: `${file.kind}/${file.name}`,
+    });
+  }
   res.status(status).json({
     files: result.files.map(withLinks),
     failures: result.failures,
@@ -380,6 +386,9 @@ async function handleAction(body: Record<string, unknown>, req: VercelRequest, r
         return;
       }
       await deleteVaultFileWithObjects({ store, blob: blob.store }, roomCode, file.kind, file.id);
+      await audit(store, { name: principal.name, kind: principal.isHost ? 'host' : principal.client === 'cc' ? 'agent' : 'owner' }, 'file.delete', {
+        target: file.id, roomCode, detail: `${file.kind}/${file.name}`,
+      });
       res.status(200).json({ deleted: true, id: file.id, usage: await vaultUsage(store, roomCode) });
       return;
     }
