@@ -191,14 +191,15 @@ describe('hosted MCP endpoint', () => {
     expect((await call('room_end', { code, hostKey })).ended).toBe(true);
   });
 
-  it('serves the ten-tool surface, without the hosted-only two', async () => {
+  it('serves the twelve-tool surface, without the hosted-only two', async () => {
     const mcp = await connect();
     const tools = (await mcp.listTools()).tools.map(t => t.name);
 
-    expect(tools).toHaveLength(10);
+    expect(tools).toHaveLength(12);
     for (const name of [
       'room_create', 'room_join', 'room_send', 'room_listen', 'room_minutes',
       'room_leave', 'room_end', 'room_task', 'room_admin', 'room_webhook',
+      'room_files', 'room_deliverable',
     ]) {
       expect(tools).toContain(name);
     }

@@ -27,6 +27,8 @@ interface Props {
   onExportReport: () => void;
   /** Drops text into the room composer so the host can chase a task in chat. */
   onMention: (text: string) => void;
+  /** Opens the file shelf filtered to this task's materials and deliverables. */
+  onOpenTaskFiles?: (taskId: string) => void;
   /**
    * Owned by Room so the mobile tab strip can badge "needs review" without a
    * second poller running against the same board key.
@@ -240,7 +242,7 @@ export function TaskBoard({ code, me, isHost, ended, agents, artifacts, canExpor
   );
 }
 
-function TaskCard({ task, me, isHost, ended, agents, busy, run, code, onMention }: {
+function TaskCard({ task, me, isHost, ended, agents, busy, run, code, onMention, onOpenTaskFiles }: {
   task: Task;
   me: { name: string };
   isHost: boolean;
@@ -250,6 +252,7 @@ function TaskCard({ task, me, isHost, ended, agents, busy, run, code, onMention 
   run: ReturnType<typeof useTaskBoard>['run'];
   code: string;
   onMention: (text: string) => void;
+  onOpenTaskFiles?: (taskId: string) => void;
 }) {
   const [panel, setPanel] = useState<'none' | 'reject' | 'block' | 'assign' | 'resume'>('none');
   const [note, setNote] = useState('');
@@ -307,6 +310,28 @@ function TaskCard({ task, me, isHost, ended, agents, busy, run, code, onMention 
             <p className="mt-1 text-[11px] text-amber-800 break-words">Review needs: {task.reviewReadiness}</p>
           )}
           <ExecutionLine task={task} />
+
+          {/*
+            The task's paper trail. A done task with no deliverable is the
+            failure the board exists to prevent, so it says so here instead of
+            leaving a reader to assume the work exists because the state says
+            done.
+          */}
+          {(task.files?.inputs?.length || task.files?.deliverables?.length) ? (
+            <button
+              type="button"
+              onClick={() => onOpenTaskFiles?.(task.id)}
+              className="mt-1.5 flex flex-wrap items-center gap-2 rounded-lg border border-border-faint bg-surface-softer px-2.5 py-1.5 text-[11px] font-semibold text-ink-muted transition hover:border-accent/40 hover:text-accent"
+            >
+              {task.files?.deliverables?.length ? <span>🗂 {task.files.deliverables.length} deliverable{task.files.deliverables.length === 1 ? '' : 's'}</span> : null}
+              {task.files?.inputs?.length ? <span>📎 {task.files.inputs.length} input{task.files.inputs.length === 1 ? '' : 's'}</span> : null}
+              <span className="text-accent">Open files</span>
+            </button>
+          ) : task.state === 'done' ? (
+            <p className="mt-1.5 rounded-lg bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800">
+              Done with no file attached — nothing here can be re-checked later.
+            </p>
+          ) : null}
 
           {task.dod && (
             <p className="mt-2 rounded-lg bg-surface-softer px-2.5 py-2 text-[12px] leading-relaxed text-ink-muted break-words">

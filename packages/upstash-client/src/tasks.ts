@@ -1011,6 +1011,54 @@ export async function updateTask(
   return { board, task: findTask(board, id) };
 }
 
+export interface TaskFilesPatch {
+  inputs?: string[];
+  deliverables?: string[];
+}
+
+/**
+ * Record a task's vault links (materials it works from, deliverables it
+ * produced) on the board itself.
+ *
+ * The vault keeps its own `task:{id}` index, so this is not how files are
+ * found — it is what the BOARD shows: a card that says "🗂 2 deliverables" and
+ * can open them. Both directions are written because either one alone produces
+ * a lie: a card with no links while the vault knows the files, or a link to a
+ * file that has been deleted.
+ *
+ * Append-only and idempotent. A revision of the same deliverable keeps its id,
+ * so re-submitting does not grow the list. A done task is not frozen here: the
+ * verifier may attach the deliverable it inspected after the fact.
+ */
+export async function setTaskFiles(
+  client: UpstashClient,
+  code: string,
+  id: string,
+  patch: TaskFilesPatch,
+  now: number = Date.now(),
+): Promise<{ board: TaskBoard; task: Task }> {
+  const board = await casTaskBoard(client, code, (current) => {
+    const task = findTask(current, id);
+    const merge = (existing: string[] | undefined, incoming: string[] | undefined) => {
+      if (!incoming || incoming.length === 0) return existing;
+      const next = [...(existing ?? [])];
+      for (const value of incoming) if (value && !next.includes(value)) next.push(value);
+      return next.length > 0 ? next : undefined;
+    };
+    const inputs = merge(task.files?.inputs, patch.inputs);
+    const deliverables = merge(task.files?.deliverables, patch.deliverables);
+    if (JSON.stringify({ inputs, deliverables }) === JSON.stringify({ inputs: task.files?.inputs, deliverables: task.files?.deliverables })) {
+      return current;
+    }
+    const files: NonNullable<Task['files']> = {
+      ...(inputs ? { inputs } : {}),
+      ...(deliverables ? { deliverables } : {}),
+    };
+    return { ...replaceTask(current, { ...task, files, updatedAt: now }), lastProgressAt: now };
+  });
+  return { board, task: findTask(board, id) };
+}
+
 export interface WaitTaskInput {
   scope: 'owner' | 'review';
   reasonCode: TaskWaitReason;
