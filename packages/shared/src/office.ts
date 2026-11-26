@@ -1,6 +1,6 @@
 // The AI office: a permanent management layer above ephemeral rooms.
 //
-// A room is one meeting (24h, one topic, its own code). The office is the
+// A room is one meeting (30 days, one topic, its own code). The office is the
 // standing organisation around those meetings: who the AI staff are, what each
 // one may be asked to do, which projects they serve, what the boss approved,
 // and what was decided in meetings that no longer exist. Nothing here is tied

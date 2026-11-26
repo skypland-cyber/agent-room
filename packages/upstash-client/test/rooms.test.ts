@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AVATAR_PALETTE, type Room } from '@agent-room/shared';
+import { AVATAR_PALETTE, ROOM_TTL_SECONDS, type Room } from '@agent-room/shared';
 import { createClient, createRoom, getRoom, RoomNotFoundError, casRoom, ConcurrencyError, joinRoom, InterviewRoomBusyError } from '../src/index.js';
 
 const ENV = { url: 'https://example.upstash.io', token: 't' };
@@ -11,7 +11,7 @@ function mockResp(body: unknown) {
 describe('createRoom', () => {
   beforeEach(() => vi.restoreAllMocks());
 
-  it('stores a room JSON under the given code with 24h TTL', async () => {
+  it('stores a room JSON under the given code with a 30-day TTL', async () => {
     const fetchMock = vi.fn().mockResolvedValue(mockResp({ result: 'OK' }));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -40,7 +40,8 @@ describe('createRoom', () => {
     expect(stored.ownerEmail).toBe('alex@example.com');
     expect(stored.ownerName).toBe('Alex Host');
     expect(cmd).toContain('EX');
-    expect(cmd).toContain(86400);
+    expect(ROOM_TTL_SECONDS).toBe(30 * 24 * 60 * 60);
+    expect(cmd).toContain(ROOM_TTL_SECONDS);
   });
 });
 

@@ -27,7 +27,7 @@ read the one-pen-at-a-time history after the live lease itself has expired.
 The seam uses the shared domain types. It does not expose Redis commands, SQL,
 connection objects, or credentials. `createRoomPersistence(config)` is the only
 adapter-selection point. `AGENT_ROOM_PERSISTENCE=redis` is the default and uses
-the existing Redis environment and 24-hour behavior. `postgres` requires a
+the existing Redis environment and 30-day behavior. `postgres` requires a
 server-side database URL and fails closed when it is absent. Browser code never
 receives that URL.
 
@@ -42,7 +42,7 @@ its own seam.
 
 | Record | Redis default | Postgres durable mode |
 | --- | --- | --- |
-| Room | Hard expiry 24 hours after creation | Retained until an explicit retention/deletion action |
+| Room | Hard expiry 30 days after creation | Retained until an explicit retention/deletion action |
 | Participants | Stored in the room JSON and expires with it | Versioned room state; survives restart and elapsed wall time |
 | Messages/transcript | Ordered list, trimmed to the current Redis cap, expires with room | Append-only ordered rows; no TTL and no destructive trim |
 | Tasks | Versioned board with room TTL | Versioned current board plus durable update timestamp |
@@ -54,7 +54,7 @@ in both adapters, so top-level or nested object-key order cannot change whether
 the same payload is accepted as an idempotent retry.
 
 “Durable” means a committed record is visible after server-process restart and
-after a clock advance beyond 25 hours. It does not mean undeletable: explicit
+after a clock advance beyond 30 days. It does not mean undeletable: explicit
 retention/deletion remains possible, auditable work outside this PR. Failed
 transactions publish no partial room record. Per-room message sequence and
 receipt uniqueness are database constraints rather than process memory.
@@ -101,13 +101,13 @@ two-store write would create an ambiguous source of truth.
 ## Proof bar
 
 - The existing Redis suite passes unchanged through the adapter and proves the
-  24-hour expiry remains the default.
+  30-day expiry remains the default.
 - A production-entry test selects Redis when the flag is absent.
 - CI starts a local Postgres service, applies the numbered migration, creates a
   room through the production entry, restarts the server/store object, advances
-  the clock 25 hours, and reads the same room, transcript, tasks, minutes, and
+  the clock 31 days, and reads the same room, transcript, tasks, minutes, and
   receipt.
-- Restored-defect kills cover adapter selection, restart persistence, 25-hour
+- Restored-defect kills cover adapter selection, restart persistence, 30-day
   retention, message ordering, task CAS, and receipt idempotency.
 - Tests use synthetic records. No hosted database, deployment, Railway setting,
   or secret is part of this PR.

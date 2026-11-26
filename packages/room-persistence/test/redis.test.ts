@@ -212,14 +212,16 @@ describe('RedisRoomPersistence compatibility', () => {
     ]);
   });
 
-  it('expires a production-entry Redis room after a 25-hour clock skip', async () => {
+  it('expires a production-entry Redis room once the 30-day TTL passes', async () => {
     const redis = new ExpiringRedis();
     const server = await RoomRecordServer.fromEnvironment({}, { redisClient: redis });
     await server.createRoom(room());
     expect(await server.getRoom(room().code)).toEqual(room());
 
-    redis.advance(25 * 60 * 60);
+    redis.advance(ROOM_TTL_SECONDS - 60);
+    expect(await server.getRoom(room().code)).toEqual(room());
 
+    redis.advance(120);
     expect(await server.getRoom(room().code)).toBeNull();
   });
 

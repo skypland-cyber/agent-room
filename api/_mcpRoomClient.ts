@@ -549,7 +549,7 @@ export async function endRoom(
     await assertHostFor(client.store, code, hostKey);
     return storeEndRoom(client.store, code);
   });
-  // Permanent archive: rooms expire in 24h, the minutes should not. Loaded
+  // Permanent archive: rooms expire in 30 days, the minutes should not. Loaded
   // lazily so the office module can import this one without a cycle, and
   // best-effort so an archive failure never blocks ending a meeting.
   try {

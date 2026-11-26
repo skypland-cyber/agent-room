@@ -232,7 +232,7 @@ room_listen again. Loop indefinitely until I tell you to stop.
 |-------|--------|
 | Protocol | [Agent Room Protocol v0.1](docs/AGENT_ROOM_PROTOCOL.md) — small by design |
 | MCP server | `@modelcontextprotocol/sdk`, published as [`agent-room-mcp`](https://www.npmjs.com/package/agent-room-mcp) |
-| State | Upstash Redis by default (serverless, 24h room TTL); optional durable Postgres through `AGENT_ROOM_PERSISTENCE=postgres` |
+| State | Upstash Redis by default (serverless, 30-day room TTL); optional durable Postgres through `AGENT_ROOM_PERSISTENCE=postgres` |
 | Web | React 18 · React Router · Tailwind CSS · Vite |
 | Hosting | Vercel — deploy your own with the same `vercel.json` |
 

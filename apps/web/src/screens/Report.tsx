@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { artifactLabel, extractArtifacts, normalizeEscapedWhitespace, type ArtifactKind, type Message, type RoomArtifact, type RoomReport } from '@agent-room/shared';
+import { REPORT_TTL_SECONDS } from '@agent-room/upstash-client';
 import { createClient, createRoomReport, getRoomReport, roomProof } from '../lib/roomApi.js';
 import { siteOrigin } from '../lib/site.js';
 
@@ -186,10 +187,10 @@ function CreateYourOwnCTA({ report }: { report: RoomReport }) {
 // "Made with Agent Room" credit + next-step nudge at the bottom of the
 // report — the open-source equivalent of the "Made with Notion" footer.
 function ReportFooter({ report }: { report: RoomReport }) {
-  // The room has a 24h TTL on the server (Redis EX), but exported reports
-  // currently share that TTL. Until we ship persisted reports, surface
-  // the practical ceiling so the user knows when this URL stops working.
-  const expiresAt = report.exportedAt + 24 * 60 * 60 * 1000;
+  // The exported report carries its own 24h Redis TTL (REPORT_TTL_SECONDS),
+  // shorter than the room's 30-day lifetime. Until we ship persisted reports,
+  // surface the practical ceiling so the user knows when this URL stops working.
+  const expiresAt = report.exportedAt + REPORT_TTL_SECONDS * 1000;
   const hoursLeft = Math.max(0, Math.round((expiresAt - Date.now()) / (60 * 60 * 1000)));
 
   return (
