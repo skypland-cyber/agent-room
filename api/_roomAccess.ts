@@ -21,6 +21,8 @@ export async function withinRateLimit(store: UpstashClient, key: string, limit: 
 }
 
 export interface McpGrant {
+  /** The grant's own key: the SHA-256 of the bearer token (never the token). */
+  id?: string;
   rooms: '*' | string[];
   create?: boolean;
   profile?: 'core' | 'full';
@@ -44,5 +46,5 @@ export function authenticateMcp(header: unknown, config: string | undefined) {
         grant.requestsPerMinute < 1 || grant.requestsPerMinute > 600))) {
     throw new Error('Invalid MCP grant.');
   }
-  return { id, grant };
+  return { id, grant: { ...grant, id } };
 }

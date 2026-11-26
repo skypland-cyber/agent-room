@@ -17,7 +17,7 @@ import {
   listMessages,
   archiveRoom,
   bumpAgentTask,
-  findAgentByName,
+  findAgentForRoomName,
   listAgents,
   listArchives,
   listHeartbeats,
@@ -42,6 +42,7 @@ import {
   agentPresence,
   filterAudit,
   kstDay,
+  officeBaseName,
   usageLevel,
 } from '@agent-room/shared';
 import type {
@@ -187,6 +188,19 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
   const failed: OfficeTaskRef[] = [];
   const ownedByAgent = new Map<string, Array<{ code: string; id: string }>>();
   const reviewsByAgent = new Map<string, Array<{ code: string; id: string }>>();
+  // Board work is recorded under the room name the agent was using, and rooms
+  // decorate names: a rejoin gets "Gemini (2)", an agent adds its role
+  // ("망고 (총괄 매니저)"). Presence is read from the roster name, so fold a
+  // decorated owner/verifier onto the staff member it belongs to. A name that
+  // is literally on the roster always wins, so "Claude (dev)" stays its own
+  // entry when the office has both.
+  const rosterKeys = new Set(agents.map(agent => agent.name.trim().toLowerCase()));
+  const staffKey = (who: string): string => {
+    const lower = who.trim().toLowerCase();
+    if (rosterKeys.has(lower)) return lower;
+    const base = officeBaseName(who).toLowerCase();
+    return base && rosterKeys.has(base) ? base : lower;
+  };
   let openTasks = 0;
   let doneTasks = 0;
 
@@ -208,15 +222,17 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
       }
       if (task.state === 'awaiting_review' && task.verifier) {
         if (task.qa && task.qa.status === 'pending') qaQueue.push(ref);
-        const list = reviewsByAgent.get(task.verifier.toLowerCase()) ?? [];
+        const verifier = staffKey(task.verifier);
+        const list = reviewsByAgent.get(verifier) ?? [];
         list.push({ code, id: task.id });
-        reviewsByAgent.set(task.verifier.toLowerCase(), list);
+        reviewsByAgent.set(verifier, list);
       }
       if (task.state === 'rejected') failed.push(ref);
       if (task.owner && (task.state === 'in_progress' || task.state === 'rejected')) {
-        const list = ownedByAgent.get(task.owner.toLowerCase()) ?? [];
+        const owner = staffKey(task.owner);
+        const list = ownedByAgent.get(owner) ?? [];
         list.push({ code, id: task.id });
-        ownedByAgent.set(task.owner.toLowerCase(), list);
+        ownedByAgent.set(owner, list);
       }
     }
     rooms.push({
@@ -233,11 +249,12 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
   }
 
   const agentViews: OfficeAgentView[] = agents.map(agent => {
-    const heartbeat = heartbeats[agent.name.trim().toLowerCase()];
+    const key = agent.name.trim().toLowerCase();
+    const heartbeat = heartbeats[key];
     const presence = agentPresence(agent, {
       ...(heartbeat ? { heartbeatAt: heartbeat.at } : {}),
-      active: ownedByAgent.get(agent.name.toLowerCase()) ?? [],
-      reviews: reviewsByAgent.get(agent.name.toLowerCase()) ?? [],
+      active: ownedByAgent.get(key) ?? [],
+      reviews: reviewsByAgent.get(key) ?? [],
     }, now);
     const used = agentUsage[agent.id] ?? 0;
     return {
@@ -337,6 +354,22 @@ export async function captureRoomArchive(
 }
 
 /**
+ * The name the office seats a staff member under.
+ *
+ * Rooms take whatever name an agent introduces itself with, and agents decorate
+ * it ("망고 (총괄 매니저)"). The roster keeps one plain name, and the tasks the
+ * boss assigns carry that name — so a decorated seat has to be brought back to
+ * the roster name, or the assignments and the heartbeat never find it. A name
+ * the roster does not know is left exactly as it came in.
+ */
+export async function officeSeatName(store: UpstashClient, name: string): Promise<string> {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (!trimmed) return trimmed;
+  const agent = await findAgentForRoomName(store, trimmed).catch(() => null);
+  return agent?.name?.trim() || trimmed;
+}
+
+/**
  * Capacity gate used by the MCP task path.
  *
  * A registered agent over its daily limit (or paused/disabled) cannot be handed
@@ -346,7 +379,7 @@ export async function captureRoomArchive(
 export async function assertAgentCapacity(store: UpstashClient, name: string, now: number = Date.now()): Promise<void> {
   const trimmed = name?.trim();
   if (!trimmed) return;
-  const agent = await findAgentByName(store, trimmed).catch(() => null);
+  const agent = await findAgentForRoomName(store, trimmed).catch(() => null);
   if (!agent) return;
   const capacity = await agentCapacity(store, kstDay(now), agent);
   if (!capacity.ok) throw new OfficeApiError(capacity.reason ?? `${agent.name} cannot take more work today.`, 429, 'agent_daily_limit');
@@ -358,8 +391,9 @@ export async function noteAgentTask(store: UpstashClient, name: string, now: num
   if (!trimmed) return;
   try {
     // Name index -> id, then one INCR: the write path must not walk the whole
-    // roster every time a task is created.
-    const agent = await findAgentByName(store, trimmed);
+    // roster every time a task is created. The owner name comes from the room,
+    // so it may carry a suffix or a role label (see findAgentForRoomName).
+    const agent = await findAgentForRoomName(store, trimmed);
     if (!agent) return;
     await bumpAgentTask(store, kstDay(now), agent.id);
   } catch { /* counters are advisory */ }

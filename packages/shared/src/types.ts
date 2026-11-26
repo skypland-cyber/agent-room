@@ -34,6 +34,12 @@ export interface Participant {
   seatKeyHash?: string;
   /** Stable public seat identity; possession is still proven by seatKey. */
   seatId?: string;
+  /**
+   * Which agent grant seated this row: the MCP grant's own id, which is a hash
+   * of the token rather than the token. A rejoin on the same grant reclaims the
+   * seat instead of forking "Name (2)". Server-owned; a caller's value is ignored.
+   */
+  grantRef?: string;
   /** Agent-declared working context, bound to seatId and cleared on rejoin. */
   capabilities?: AgentCapabilityReport;
 }

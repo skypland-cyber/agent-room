@@ -255,6 +255,19 @@ describe('what each agent is doing', () => {
     const held = openTasksFor(agents[0]!, payload);
     expect(held.map(row => row.id)).toEqual(['T-02', 'T-01']);
   });
+
+  it('gives a room-decorated owner back to the staff member it belongs to', () => {
+    // The board keeps whatever name the room handed out: "Codex (2)" after a
+    // rejoin, "망고 (총괄 매니저)" when the manager adds its role.
+    const agents = [agent('ag_1', 'Codex', 'working'), agent('ag_2', '망고', 'working')];
+    const payload = office(agents, {
+      openTasks: [task('T-01', 'in_progress', { owner: 'Codex (2)' })],
+      approvals: [task('T-02', 'pending_approval', { owner: '망고 (총괄 매니저)' })],
+    });
+    expect(openTasksFor(agents[0]!, payload).map(row => row.id)).toEqual(['T-01']);
+    expect(approvalTasksFor(agents[1]!, payload).map(row => row.id)).toEqual(['T-02']);
+    expect(planScenes(agents, payload).map(scene => scene.zone)).toEqual(['desk', 'ceo']);
+  });
 });
 
 describe('character palettes', () => {

@@ -474,12 +474,16 @@ export async function joinRoom(
   client: RemoteRoomClient,
   code: string,
   participant: Participant,
-  options: { hostKey?: string; seatKey?: string } = {},
+  options: { hostKey?: string; seatKey?: string; grantRef?: string } = {},
 ): Promise<Room & { participant: Participant; seatKey?: string }> {
   return guarded(async () => {
     const result = await storeJoinRoom(client.store, code, participant, {
       ...(options.hostKey ? { hostKey: options.hostKey } : {}),
       ...(options.seatKey ? { seatKey: options.seatKey } : {}),
+      // Which MCP grant opened this seat. Without it a restart that lost its
+      // seatKey is indistinguishable from a stranger using the same name, and
+      // the room forks a second row for the same agent.
+      ...(options.grantRef ? { grantRef: options.grantRef } : {}),
       requireSeatProof: true,
       priorIdentity: { name: participant.name, client: 'cc' as const },
     });

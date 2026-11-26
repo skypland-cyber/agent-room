@@ -72,6 +72,46 @@ export interface OfficeAgent {
   lastHeartbeatRoom?: string;
 }
 
+// ─── Room names vs roster names ───────────────────────────────────────────
+//
+// The roster has one plain name per AI ("Gemini", "망고"). The room layer, by
+// contrast, hands out decorated display names for two very ordinary reasons:
+//
+//   - a seat that rejoins without its seatKey gets the room's collision suffix
+//     (joinRoom: "Gemini" is taken, so the newcomer becomes "Gemini (2)"), and
+//   - an agent that introduces itself with its role in brackets joins as
+//     "망고 (총괄 매니저)".
+//
+// Both are the same staff member. Matching them by exact string left the office
+// reading a working agent as offline — no heartbeat, no owned task, an empty
+// desk — so the roster lookup strips the decoration instead.
+//
+// Only a *trailing* decoration is stripped: a collision suffix of 1–3 digits in
+// brackets ("Gemini (2)"), or one bracketed qualifier at the end of the name
+// ("망고 (총괄 매니저)"). Something inside the name ("AI (beta) team") is left
+// alone, and a roster entry that literally carries the brackets always wins,
+// because callers look for the exact name first.
+export function officeBaseName(name: string): string {
+  let value = typeof name === 'string' ? name.replace(/\s+/g, ' ').trim() : '';
+  // Two decorations can stack ("Gemini (2) (백업)"), so peel them off one at a
+  // time until the name stops changing.
+  for (let pass = 0; pass < 3; pass++) {
+    const stripped = value.replace(/\s*\(\s*\d{1,3}\s*\)$/, '').trim();
+    const qualified = /^(.*?)\s*\([^()]{1,60}\)$/.exec(stripped);
+    const next = qualified && qualified[1]!.trim() ? qualified[1]!.trim() : stripped;
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+/** Do two room names name the same staff member once decorations are ignored? */
+export function officeNamesMatch(a: string | undefined, b: string | undefined): boolean {
+  const left = officeBaseName(a ?? '').toLowerCase();
+  const right = officeBaseName(b ?? '').toLowerCase();
+  return Boolean(left) && left === right;
+}
+
 export type OfficeAgentStatus = 'working' | 'reviewing' | 'idle' | 'paused' | 'offline';
 
 export interface OfficeAgentPresence {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AVATAR_PALETTE, ROOM_TTL_SECONDS, type Room } from '@agent-room/shared';
 import { createClient, createRoom, getRoom, RoomNotFoundError, casRoom, ConcurrencyError, joinRoom, InterviewRoomBusyError } from '../src/index.js';
+import { sha256Hex } from '../src/sha256.js';
 
 const ENV = { url: 'https://example.upstash.io', token: 't' };
 
@@ -285,6 +286,84 @@ describe('joinRoom', () => {
     // Mute model: everyone (web + cc) defaults to true. Host mutes
     // specific participants via setMuted() if they need to be silenced.
     expect(updated.participant.canSpeak).toBe(true);
+  });
+
+  describe('agent seat reclaim', () => {
+    // A reconnect used to mint a new row: "Gemini" stayed behind holding its
+    // tasks, the returning process became "Gemini (2)", and the office roster —
+    // which knows one "Gemini" — matched neither name. These lock in the three
+    // proofs that let a returning seat take its own row back.
+    const GRANT = 'a'.repeat(64);
+    const NOW = Date.now();
+
+    async function joinAgainst(before: Room, participant: Record<string, unknown>, options: Record<string, unknown> = {}) {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(mockResp({ result: JSON.stringify(before) }))
+        .mockResolvedValueOnce(mockResp({ result: '1' }));
+      vi.stubGlobal('fetch', fetchMock);
+      const client = createClient(ENV);
+      const updated = await joinRoom(client, 'A', {
+        role: '', color: '#000', initials: 'GE', client: 'cc', joinedAt: NOW, lastSeenAt: NOW,
+        ...participant,
+      } as never, options as never);
+      return updated;
+    }
+
+    function seat(overrides: Record<string, unknown>): Room {
+      return {
+        code: 'A', topic: 't', createdAt: 0, createdBy: 'host', status: 'active', version: 1,
+        participants: [{ name: 'Gemini', role: '', color: '#111', initials: 'GE', client: 'cc',
+          joinedAt: 0, lastSeenAt: NOW, canSpeak: true, ...overrides } as never],
+      };
+    }
+
+    it('keeps the seat its seatKey proves instead of forking "(2)"', async () => {
+      const key = 'seat-key-1';
+      const before = seat({ seatKeyHash: await sha256Hex(key) });
+      const updated = await joinAgainst(before, { name: 'Gemini' }, { seatKey: key });
+      expect(updated.participant.name).toBe('Gemini');
+      expect(updated.participants).toHaveLength(1);
+      expect(updated.seatKey).toBe(key);
+    });
+
+    it('reclaims the seat left behind on the same grant after a restart', async () => {
+      const before = seat({ name: 'Gemini (2)', grantRef: GRANT });
+      const updated = await joinAgainst(before, { name: 'Gemini' }, { grantRef: GRANT });
+      expect(updated.participants).toHaveLength(1);
+      expect(updated.participant.name).toBe('Gemini');
+      expect(updated.participants[0]!.grantRef).toBe(GRANT);
+      // No old key was presented, so the seat gets a fresh one: whatever held
+      // the old one is fenced out.
+      expect(updated.seatKey).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('does not hand a seat to a different grant that uses the same name', async () => {
+      const before = seat({ grantRef: GRANT });
+      const updated = await joinAgainst(before, { name: 'Gemini' }, { grantRef: 'b'.repeat(64) });
+      expect(updated.participant.name).toBe('Gemini (2)');
+      expect(updated.participants).toHaveLength(2);
+    });
+
+    it('takes over a quiet placeholder seat that carries no grant', async () => {
+      const before = seat({ name: 'Codex', lastSeenAt: NOW - 6 * 60_000 });
+      const updated = await joinAgainst(before, { name: 'Codex' });
+      expect(updated.participant.name).toBe('Codex');
+      expect(updated.participants).toHaveLength(1);
+    });
+
+    it('leaves a live, unproven seat exactly where it was', async () => {
+      const before = seat({ name: 'Codex', seatKeyHash: await sha256Hex('someone-elses-key') });
+      const updated = await joinAgainst(before, { name: 'Codex' });
+      expect(updated.participant.name).toBe('Codex (2)');
+      expect(updated.participants).toHaveLength(2);
+    });
+
+    it('ignores a grantRef sent in the participant payload', async () => {
+      const before = seat({ grantRef: GRANT });
+      const updated = await joinAgainst(before, { name: 'Gemini', grantRef: 'f'.repeat(64) });
+      expect(updated.participant.name).toBe('Gemini (2)');
+      expect(updated.participant.grantRef).toBeUndefined();
+    });
   });
 
   describe('interview room candidate lock', () => {
