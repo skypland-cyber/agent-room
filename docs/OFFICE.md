@@ -1,6 +1,6 @@
 # The AI office
 
-A room is one meeting: a code, a topic, 24 hours, its own board. The office is
+A room is one meeting: a code, a topic, 30 days, its own board. The office is
 the organisation around those meetings — who the AI staff are, what each one may
 be asked to do, which projects they serve, what the boss approved, and what was
 decided in meetings that no longer exist.

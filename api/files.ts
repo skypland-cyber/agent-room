@@ -94,7 +94,7 @@ function sendError(res: VercelResponse, error: unknown): void {
   }
   const name = (error as { name?: string }).name;
   if (name === 'RoomNotFoundError') {
-    res.status(404).json({ error: 'room_not_found', message: 'That room no longer exists (rooms expire 24h after creation).' });
+    res.status(404).json({ error: 'room_not_found', message: 'That room no longer exists (rooms expire 30 days after creation).' });
     return;
   }
   res.status(500).json({ error: 'vault_error', message: error instanceof Error ? error.message : 'File request failed.' });

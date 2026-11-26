@@ -20,7 +20,7 @@
 //
 // LIFETIME. Materials follow the meeting: they carry a TTL and are cleaned up
 // with it. Deliverables carry NO TTL — that is the whole point of the
-// deliverables vault, and it is why the room document's 24h expiry (which the
+// deliverables vault, and it is why the room document's expiry (which the
 // old attachments inherited) must not be reused here. Their storage keys also
 // sit under a different prefix than room attachments, so ending a meeting
 // (api/delete-room-blobs, prefix `rooms/{code}/`) cannot delete them.

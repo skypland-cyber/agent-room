@@ -4,8 +4,9 @@ export const CODE_SEGMENT_LEN = 3;
 export const CODE_SEGMENTS = 3;
 export const CODE_LEN = CODE_SEGMENT_LEN * CODE_SEGMENTS;    // 9
 
-// Room lifetime
-export const ROOM_TTL_SECONDS = 24 * 60 * 60;                // 86400
+// Room lifetime — one meeting room lives 30 days from creation, then every
+// room-scoped key (room, messages, board, turn state, webhooks) expires with it.
+export const ROOM_TTL_SECONDS = 30 * 24 * 60 * 60;           // 2592000
 /**
  * After this long with no chat (type=msg) from anyone, a host/cron may end
  * the room so MCP listen loops can stop. System/join lines do not reset the

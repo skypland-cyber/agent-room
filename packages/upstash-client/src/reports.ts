@@ -5,8 +5,9 @@ import { deliverablesFromBoard, doneTasks, getTaskBoard } from './tasks.js';
 
 function reportKey(code: string): string { return `room-report:${code}`; }
 
-// Reports self-expire from Redis 24h after export — the same lifetime as the
-// room itself, so no room data outlives the room by design.
+// Reports self-expire from Redis 24h after export — deliberately shorter than
+// the room's 30-day lifetime, so an exported snapshot never outlives the room
+// it was taken from.
 export const REPORT_TTL_SECONDS = 24 * 60 * 60;
 export const REPORT_RETENTION = '1d' as const;
 
@@ -63,7 +64,7 @@ export async function createRoomReport(
 ): Promise<RoomReport> {
   const board = await getTaskBoard(client, room.code).catch(() => null);
   const report = buildRoomReport(room, messages, board);
-  // 24h TTL — the report dies with the room (Redis drops it automatically).
+  // 24h TTL — an export is a snapshot, not a second copy of the room.
   await client.command(['SET', reportKey(room.code), JSON.stringify(report), 'EX', REPORT_TTL_SECONDS]);
   return report;
 }

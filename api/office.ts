@@ -109,7 +109,7 @@ function fail(res: VercelResponse, error: unknown): void {
   const message = error instanceof Error ? error.message : 'The office request failed.';
   switch (name) {
     case 'RoomNotFoundError':
-      send(res, 404, { error: 'room_not_found', message: 'That room no longer exists (rooms expire 24h after creation).' });
+      send(res, 404, { error: 'room_not_found', message: 'That room no longer exists (rooms expire 30 days after creation).' });
       return;
     case 'RoomCodeTakenError':
       send(res, 409, { error: 'room_code_taken', message });

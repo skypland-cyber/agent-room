@@ -1,6 +1,6 @@
 // Persistent storage for the AI office.
 //
-// Rooms expire (24h, `room:{code}` with a TTL). The office does not: staff,
+// Rooms expire (30 days, `room:{code}` with a TTL). The office does not: staff,
 // projects, standing instructions, meeting archives, the audit log and usage
 // counters all live in keys without a TTL, because they are the memory of the
 // organisation rather than of one meeting.

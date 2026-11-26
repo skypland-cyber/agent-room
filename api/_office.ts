@@ -325,7 +325,7 @@ export async function captureRoomArchive(
   now: number = Date.now(),
 ): Promise<{ id: string; roomCode: string; topic: string; messageCount: number }> {
   const room = await getRoom(store, code).catch(() => undefined);
-  if (!room) throw new OfficeApiError(`No room ${code} to archive (rooms expire 24h after creation).`, 404, 'room_not_found');
+  if (!room) throw new OfficeApiError(`No room ${code} to archive (rooms expire 30 days after creation).`, 404, 'room_not_found');
   const [messages, board] = await Promise.all([
     listMessages(store, code, 0).catch(() => []),
     getTaskBoard(store, code).catch(() => null),
