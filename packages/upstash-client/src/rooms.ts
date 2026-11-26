@@ -4,7 +4,7 @@ import type {
   ReplyMode,
   ReplyModeConfig,
 } from '@agent-room/shared';
-import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS, PRESENCE_DISCONNECTED_MS, ROOM_TTL_SECONDS, participantMemberId } from '@agent-room/shared';
+import { AVATAR_PALETTE, DEFAULT_TURN_TIMEOUTS_MS, PRESENCE_DISCONNECTED_MS, ROOM_TTL_SECONDS, officeNamesMatch, participantMemberId } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
 import { sha256Hex } from './sha256.js';
 import { RoomNotFoundError, ConcurrencyError } from './errors.js';
@@ -210,6 +210,11 @@ export interface JoinRoomOptions {
   // keeps the seat identity (and any execution lease bound to it); anything
   // else rotates the key, fencing whichever process held the old one.
   seatKey?: string;
+  // Agent seats only: the MCP grant this call authenticated with (the grant's
+  // own id, which is a hash — never the token). A restarted agent that lost its
+  // seatKey still arrives on the same grant, so the seat it left behind is
+  // reclaimed instead of forking a second row under "Name (2)".
+  grantRef?: string;
 }
 
 // Returns the updated Room with an extra `participant` field showing the
@@ -274,6 +279,55 @@ function uniqueColorForRoom(
   return AVATAR_PALETTE.find(color => !used.has(color)) ?? desiredColor;
 }
 
+/** The grant id as stored on a seat: opaque, and never the token itself. */
+function seatGrantRef(grantRef: unknown): string | undefined {
+  return typeof grantRef === 'string' && /^[a-f0-9]{16,64}$/.test(grantRef) ? grantRef : undefined;
+}
+
+/**
+ * The existing seat this join is a return to, if any.
+ *
+ * Three proofs, strongest first:
+ *   1. the presented seatKey hashes to that row's stored key — the seat is
+ *      provably this caller's;
+ *   2. the row was seated on the same MCP grant and answers to the same base
+ *      name ("Gemini (2)" is "Gemini"), which is how an agent whose session
+ *      file is gone comes back;
+ *   3. the row holds exactly this name, was seated without a grant, and has
+ *      gone quiet by the room's own presence rule (isParticipantStale) — a
+ *      placeholder seat the office reserved, or a row from before grants were
+ *      recorded. A row *with* a grant is never taken this way: a stranger must
+ *      not inherit a live agent's seat just by typing its name.
+ *
+ * Without this, every reconnect minted a new row ("Gemini", then "Gemini (2)",
+ * then "Gemini (3)"), the old row kept its tasks and its name, and nothing the
+ * agent did afterwards matched what it had done before. Only agent (cc) seats
+ * are reclaimed: a web visitor's row is theirs by sessionStorage, and two
+ * people who type the same name stay distinguishable.
+ */
+function reclaimableSeat(
+  current: Room,
+  participant: Participant,
+  presentedSeatHash: string | undefined,
+  grantRef: string | undefined,
+): Participant | undefined {
+  if (participant.client !== 'cc') return undefined;
+  const seats = current.participants.filter(p => p.client === 'cc');
+  if (presentedSeatHash) {
+    const proven = seats.find(p => seatHashMatches(p.seatKeyHash, presentedSeatHash));
+    if (proven) return proven;
+  }
+  if (grantRef) {
+    const onGrant = seats.filter(p => p.grantRef === grantRef);
+    const match = onGrant.find(p => namesEqualIgnoreCase(p.name, participant.name))
+      ?? onGrant.find(p => officeNamesMatch(p.name, participant.name));
+    if (match) return match;
+  }
+  const quiet = seats.find(p => namesEqualIgnoreCase(p.name, participant.name));
+  if (quiet && !quiet.grantRef && isParticipantStale(quiet)) return quiet;
+  return undefined;
+}
+
 export async function joinRoom(
   client: UpstashClient,
   code: string,
@@ -294,14 +348,25 @@ export async function joinRoom(
   const room = await casRoom(client, code, (current) => {
     // Seat identity and capability provenance are server-owned: never taken
     // from the caller-supplied participant object.
-    const { seatKeyHash: _h, seatId: _i, capabilities: _c, ...input } = participant;
+    const { seatKeyHash: _h, seatId: _i, capabilities: _c, grantRef: _g, ...input } = participant;
     let next: Participant = { ...input };
     const isOwnerReclaim = Boolean(
       options.authedUserId && current.ownerId && options.authedUserId === current.ownerId,
     );
     const priorSeat = current.participants.find(p => isPriorIdentity(p, options.priorIdentity));
-    const priorIdentity = !options.requireSeatProof || seatHashMatches(priorSeat?.seatKeyHash, presentedSeatHash)
+    const assertedPriorIdentity = !options.requireSeatProof || seatHashMatches(priorSeat?.seatKeyHash, presentedSeatHash)
       ? options.priorIdentity : undefined;
+    // A claimable seat the caller proved out of band (seatKey, grant, or the
+    // room's own disconnect rule) is as good as a prior identity: the row it
+    // names is this caller's, so it must not be counted as a collision.
+    const grantedRef = seatGrantRef(options.grantRef);
+    const reclaimedSeat = assertedPriorIdentity
+      ? undefined
+      : reclaimableSeat(current, participant, presentedSeatHash, grantedRef);
+    const priorIdentity = assertedPriorIdentity
+      ?? (reclaimedSeat ? { name: reclaimedSeat.name, client: reclaimedSeat.client } : undefined);
+    // The seat keeps the grant it was seated on unless this call names another.
+    const grantRef = grantedRef ?? seatGrantRef(reclaimedSeat?.grantRef);
     // Host claim: exact/case-insensitive createdBy match, or signed-in room owner.
     const isClaimingHost = isOwnerReclaim || namesEqualIgnoreCase(participant.name, current.createdBy);
 
@@ -374,6 +439,7 @@ export async function joinRoom(
         : { ...next, seatKeyHash: freshSeatHash, seatId: freshSeatHash.slice(0, 32) };
       issuedSeatKey = kept ? options.seatKey : freshSeatKey;
     }
+    if (grantRef) next = { ...next, grantRef };
     // Assigned AFTER the canSpeak materialization so the returned
     // `outParticipant` reflects the final stored row, including its
     // approval state (callers like the MCP room_join handler look at this

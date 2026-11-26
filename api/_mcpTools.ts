@@ -1,6 +1,6 @@
 import { isValidCode } from '@agent-room/shared';
 import { siteUrl } from './_siteUrl.js';
-import { OfficeApiError, assertAgentCapacity, noteAgentTask } from './_office.js';
+import { OfficeApiError, assertAgentCapacity, noteAgentTask, officeSeatName } from './_office.js';
 import { assertHostFor } from './_mcpRoomClient.js';
 import { findSeat, type McpGrant } from './_roomAccess.js';
 // Tool surface for the hosted MCP endpoint (`/api/mcp`).
@@ -1211,7 +1211,7 @@ export async function callTool(
   }
   try {
     if (grant) await authorizeTool(client, grant, name, args);
-    return await dispatch(client, name, args, harness, profile);
+    return await dispatch(client, name, args, harness, profile, grant?.id);
   } catch (e) {
     if (e instanceof RemoteRoomApiError) {
       if (e.code === 'MutedError') {
@@ -1314,28 +1314,37 @@ async function dispatch(
   a: Record<string, any>,
   harness?: HttpHarness,
   profile: McpProfile = 'full',
+  grantId?: string,
 ): Promise<McpToolResult> {
+  // The seat records which MCP grant it was opened with, so an agent that
+  // restarts without its seatKey reclaims the seat it left instead of being
+  // renamed "Name (2)" — a name the office roster, and its own old tasks, no
+  // longer match. The grant id is a hash of the token, never the token.
+  const joinOptions = grantId ? { grantRef: grantId } : {};
   switch (name) {
     case 'room_create': {
-      const created = await createRoom(client, { topic: a.topic, createdBy: a.name });
+      // Created and seated under the roster name when the office knows one, so
+      // the host claim, the heartbeat and later assignments all use one name.
+      const hostName = (await officeSeatName(client.store, a.name)) || a.name;
+      const created = await createRoom(client, { topic: a.topic, createdBy: hostName });
       const code = created.code;
       const participant: Participant = {
-        name: a.name,
+        name: hostName,
         role: a.role ?? '',
-        color: colorForName(a.name),
-        initials: initialsFor(a.name),
+        color: colorForName(hostName),
+        initials: initialsFor(hostName),
         client: 'cc',
         joinedAt: Date.now(),
         lastSeenAt: Date.now(),
       };
-      const joined = await joinRoom(client, code, participant, { hostKey: created.hostKey });
+      const joined = await joinRoom(client, code, participant, { hostKey: created.hostKey, ...joinOptions });
       const msgs = await listMessages(client, code, 0);
       return ok({
         code,
         topic: created.topic,
         joinUrl: `${siteUrl()}/j/${code}`,
         cursor: msgs.length,
-        nextAction: nextListenAction(code, msgs.length, a.name),
+        nextAction: nextListenAction(code, msgs.length, hostName),
         hostKey: created.hostKey,
         seatKey: joined.seatKey,
         roleBrief: roleBriefFor(a.role ?? ''),
@@ -1344,20 +1353,26 @@ async function dispatch(
     }
 
     case 'room_join': {
+      // Seat under the roster name when the office knows this agent: an agent
+      // that introduces itself as "망고 (총괄 매니저)" would otherwise sit in the
+      // room under a name that neither its heartbeat nor the tasks the boss
+      // assigned to "망고" can match.
+      const seatName = (await officeSeatName(client.store, a.name)) || a.name;
       const participant: Participant = {
-        name: a.name,
+        name: seatName,
         role: a.role ?? '',
-        color: colorForName(a.name),
-        initials: initialsFor(a.name),
+        color: colorForName(seatName),
+        initials: initialsFor(seatName),
         client: 'cc',
         joinedAt: Date.now(),
         lastSeenAt: Date.now(),
       };
       const before = await getRoom(client, a.code);
-      const reconnecting = before.participants.some(p => p.name === a.name && p.client === 'cc');
+      const reconnecting = before.participants.some(p => p.name === seatName && p.client === 'cc');
       const updated = await joinRoom(client, a.code, participant, {
         hostKey: typeof a.hostKey === 'string' && a.hostKey ? a.hostKey : undefined,
         seatKey: typeof a.seatKey === 'string' && a.seatKey ? a.seatKey : undefined,
+        ...joinOptions,
       });
       const finalName = updated.participant.name;
       // Office presence: a join is the first heartbeat of a session.
@@ -1412,6 +1427,11 @@ async function dispatch(
           muted
             ? `Joined as "${finalName}" but the host has muted you — keep listening until unmuted.`
             : `Joined as "${finalName}".`,
+          // A folded name is the roster's, and saying so keeps the agent from
+          // reintroducing itself under its decorated name on the next join.
+          a.name !== seatName
+            ? `The office roster seats you as "${seatName}"; use that name for room_join, room_send and room_listen so the boss's assignments and your heartbeat reach you.`
+            : '',
           joinInbox.hint,
           // Board work outranks presence: an agent told to listen right after
           // being handed a task listens, and the task sits.

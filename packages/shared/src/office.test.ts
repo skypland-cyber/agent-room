@@ -14,6 +14,8 @@ import {
   normalizeOfficeSettings,
   normalizeProjectInput,
   normalizeTemplateInput,
+  officeBaseName,
+  officeNamesMatch,
   planTemplateRun,
   usageLevel,
 } from './office.js';
@@ -54,6 +56,38 @@ describe('agent presence', () => {
     }, now);
     expect(reviewing).toMatchObject({ status: 'reviewing', taskId: 'T-02', roomCode: 'BBB-111-222' });
     expect(agentPresence(agent(), { heartbeatAt: now }, now).status).toBe('idle');
+  });
+});
+
+describe('room names vs roster names', () => {
+  // Rooms decorate a name; the roster does not. This is the fold that lets a
+  // working agent stop reading as offline in the office.
+  it('strips the collision suffix a rejoin gets', () => {
+    expect(officeBaseName('Gemini (2)')).toBe('Gemini');
+    expect(officeBaseName('Gemini(3)')).toBe('Gemini');
+    expect(officeBaseName('Codex (12)')).toBe('Codex');
+  });
+
+  it('strips one trailing role label, including a Korean one', () => {
+    expect(officeBaseName('망고 (총괄 매니저)')).toBe('망고');
+    expect(officeBaseName('Claude (dev)')).toBe('Claude');
+    expect(officeBaseName('Gemini (2) (백업)')).toBe('Gemini');
+  });
+
+  it('leaves a plain name and a name with brackets inside it alone', () => {
+    expect(officeBaseName('Gemini')).toBe('Gemini');
+    expect(officeBaseName('  Aside  ')).toBe('Aside');
+    expect(officeBaseName('AI (beta) team')).toBe('AI (beta) team');
+    expect(officeBaseName('')).toBe('');
+    expect(officeBaseName('   ')).toBe('');
+  });
+
+  it('compares two names the way the office has to', () => {
+    expect(officeNamesMatch('Gemini (2)', 'gemini')).toBe(true);
+    expect(officeNamesMatch('망고 (총괄 매니저)', '망고')).toBe(true);
+    expect(officeNamesMatch('Gemini', 'Claude')).toBe(false);
+    expect(officeNamesMatch('', '')).toBe(false);
+    expect(officeNamesMatch(undefined, 'Gemini')).toBe(false);
   });
 });
 

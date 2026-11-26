@@ -87,6 +87,36 @@ Heartbeats are written by the listen path: `room_join` and `room_listen` stamp
 `office:v1:heartbeat:{name}`, throttled to one write per 30 seconds per name so a
 fast polling loop costs a read, not a write.
 
+### One agent, one name
+
+A room hands out whatever display name a seat arrives with, and two ordinary
+things decorate it: `joinRoom` suffixes a name that is already taken ("Gemini"
+→ "Gemini (2)") and an agent may introduce itself with its role in brackets
+("망고 (총괄 매니저)"). The roster keeps one plain name per AI, and the tasks the
+boss assigns carry that name, so the office reconciles the two instead of
+treating the decorated name as a stranger:
+
+- **Seating** — `room_join` / `room_create` resolve the requested name against
+the roster first (`findAgentForRoomName`) and seat the agent under the roster
+name when there is one, telling it so in the join hint. An agent that keeps its
+own decorated name is left alone if the roster has no plain entry for it.
+- **Heartbeat** — `recordAgentHeartbeat` resolves a decorated name to its roster
+entry, mirrors the stamp onto that entry, and writes the heartbeat under both the
+room name (the seat's own throttle key) and the roster name (what the dashboard
+reads).
+- **Presence** — a task owned or verified under a decorated name is folded onto
+the staff member it belongs to before `agentPresence` runs, both in
+`/api/office?action=overview` and on the pixel floor.
+- **Rejoining** — a returning seat keeps the row it left instead of forking a new
+one: a matching `seatKey` proves it, and a restart that lost its key (but not its
+MCP token) reclaims the row recorded against the same grant
+(`Participant.grantRef`). A quiet, grant-less row — a placeholder the office
+seated, or one from before grants existed — may also be taken over by name. Two
+live seats with no proof of either are still numbered apart.
+
+Without this, a working agent was drawn offline with an empty desk, and the
+`in_progress` task it was actually holding never appeared under its name.
+
 ### Work
 
 - **Approvals** — tasks created with `requiresApproval`, or by staff marked

@@ -310,6 +310,47 @@ describe('templates', () => {
   });
 });
 
+describe('presence', () => {
+  // The dashboard reads each staff member's presence from the roster name, but
+  // the board and the heartbeat carry the room name — "Gemini (2)" after a
+  // rejoin, "망고 (총괄 매니저)" for the manager. Before this fold, both read as
+  // offline while they were working.
+  it('reads a decorated room name as the staff member it belongs to', async () => {
+    const cookie = await signIn();
+    for (const [name, role] of [['Gemini', 'Research'], ['망고', 'Orchestrator']] as const) {
+      const saved = await call('agents.save', { agent: { name, role } }, cookie);
+      expect(saved.statusCode).toBe(200);
+    }
+    const { createRoom } = await import('@agent-room/upstash-client');
+    const { registerOfficeRoom, recordAgentHeartbeat } = await import('@agent-room/upstash-client');
+    const { createRemoteRoomClient } = await import('./_mcpRoomClient.js');
+    const client = createRemoteRoomClient(undefined);
+    const code = 'GEM-111-222';
+    const at = Date.now();
+    await createRoom(client.store, { code, createdBy: 'owner', topic: '속초 여행 일정' });
+    await registerOfficeRoom(client.store, code, { at });
+    await client.store.command(['SET', `task-board:${code}`, JSON.stringify({
+      code,
+      tasks: [
+        { id: 'T-01', title: '일정 초안', state: 'in_progress', owner: 'Gemini (2)', updatedAt: at },
+        { id: 'T-02', title: '일정 검토', state: 'awaiting_review', owner: 'Codex', verifier: '망고 (총괄 매니저)', updatedAt: at },
+      ],
+      updatedAt: at,
+    })]);
+    await recordAgentHeartbeat(client.store, { name: 'Gemini (2)', roomCode: code, at });
+    await recordAgentHeartbeat(client.store, { name: '망고 (총괄 매니저)', roomCode: code, at });
+
+    const overview = await call('overview', {}, cookie);
+    expect(overview.statusCode).toBe(200);
+    const byName = Object.fromEntries(
+      overview.jsonBody.overview.agents.map((agent: { name: string }) => [agent.name, agent]),
+    );
+    expect(byName.Gemini.presence).toMatchObject({ status: 'working', taskId: 'T-01', roomCode: code });
+    expect(byName['망고'].presence).toMatchObject({ status: 'reviewing', taskId: 'T-02', roomCode: code });
+    expect(overview.jsonBody.overview.counts.onlineAgents).toBe(2);
+  });
+});
+
 describe('backup', () => {
   it('exports and restores the office', async () => {
     const cookie = await signIn();

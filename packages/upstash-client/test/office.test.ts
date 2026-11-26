@@ -17,6 +17,7 @@ import {
   deleteProjectMemory,
   exportOffice,
   findAgentByName,
+  findAgentForRoomName,
   getOfficeSettings,
   importOffice,
   listAgents,
@@ -98,6 +99,46 @@ describe('AI staff', () => {
     await recordAgentHeartbeat(client, { name: 'Discovered', at: now, registerIfUnknown: true });
     const discovered = await findAgentByName(client, 'Discovered');
     expect(discovered?.paused).toBe(true);
+  });
+
+  // The bug this regresses: an agent that rejoined a room was renamed
+  // "Gemini (2)" and a manager entered as "망고 (총괄 매니저)". Neither name is
+  // on the roster, so the dashboard's read of the roster name found no stamp
+  // and drew a working agent as offline.
+  it('folds a room name onto the roster entry it belongs to', async () => {
+    const gemini = await upsertAgent(client, { name: 'Gemini', role: 'Research' }, 'owner', now);
+    const recorded = await recordAgentHeartbeat(client, { name: 'Gemini (2)', roomCode: 'AEM-6BT-B3P', at: now });
+    expect(recorded).toEqual({ recorded: true, agentId: gemini.id });
+    // The dashboard reads the roster name; the seat polls under the room name.
+    expect((await listHeartbeats(client, ['Gemini'])).gemini?.roomCode).toBe('AEM-6BT-B3P');
+    expect((await readHeartbeat(client, 'Gemini (2)'))?.at).toBe(now);
+    const roster = (await listAgents(client))[0]!;
+    expect(roster.lastHeartbeatAt).toBe(now);
+    expect(roster.lastHeartbeatRoom).toBe('AEM-6BT-B3P');
+    // Still one write per window: the decorated name's own key carries the throttle.
+    expect((await recordAgentHeartbeat(client, { name: 'Gemini (2)', at: now + 5_000 })).recorded).toBe(false);
+  });
+
+  it('folds a role label onto the roster entry', async () => {
+    const mango = await upsertAgent(client, { name: '망고', role: '총괄 오케스트레이터' }, 'owner', now);
+    const recorded = await recordAgentHeartbeat(client, { name: '망고 (총괄 매니저)', at: now });
+    expect(recorded.agentId).toBe(mango.id);
+    expect((await listHeartbeats(client, ['망고'])).망고?.at).toBe(now);
+  });
+
+  it('prefers a roster entry that really carries the brackets', async () => {
+    const plain = await upsertAgent(client, { name: 'Claude', role: 'Review' }, 'owner', now);
+    const dev = await upsertAgent(client, { name: 'Claude (dev)', role: 'Implementation' }, 'owner', now);
+    expect((await recordAgentHeartbeat(client, { name: 'Claude (dev)', at: now })).agentId).toBe(dev.id);
+    expect((await recordAgentHeartbeat(client, { name: 'Claude (2)', at: now })).agentId).toBe(plain.id);
+    expect((await findAgentForRoomName(client, 'Nobody (4)'))).toBeNull();
+  });
+
+  it('registers a discovered seat under its plain name, not its suffix', async () => {
+    await recordAgentHeartbeat(client, { name: 'Qwen (2)', at: now, registerIfUnknown: true });
+    const staff = await listAgents(client);
+    expect(staff.map(row => row.name)).toEqual(['Qwen']);
+    expect((await listHeartbeats(client, ['Qwen'])).qwen?.at).toBe(now);
   });
 });
 

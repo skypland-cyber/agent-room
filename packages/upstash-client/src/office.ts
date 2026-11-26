@@ -30,6 +30,7 @@ import {
   buildMinutes,
   normalizeOfficeSettings,
   newOfficeId,
+  officeBaseName,
 } from '@agent-room/shared';
 import type { Message, Room, Task, TaskBoard } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
@@ -151,6 +152,22 @@ export async function findAgentByName(client: UpstashClient, name: string): Prom
   return getAgent(client, id);
 }
 
+/**
+ * Roster lookup for a name that came out of a room.
+ *
+ * Rooms decorate display names — joinRoom suffixes a colliding one ("Gemini
+ * (2)") and an agent may add its role ("망고 (총괄 매니저)") — while the roster
+ * keeps one plain name per AI. Exact match first, so a staff member that really
+ * is called "Claude (dev)" keeps its own entry and is never merged away.
+ */
+export async function findAgentForRoomName(client: UpstashClient, name: string): Promise<OfficeAgent | null> {
+  const exact = await findAgentByName(client, name);
+  if (exact) return exact;
+  const base = officeBaseName(name);
+  if (!base || base.toLowerCase() === name.trim().toLowerCase()) return null;
+  return findAgentByName(client, base);
+}
+
 export async function saveAgent(client: UpstashClient, agent: OfficeAgent): Promise<OfficeAgent> {
   await writeJson(client, agentKey(agent.id), agent);
   await client.pipeline([
@@ -241,8 +258,35 @@ export async function recordAgentHeartbeat(
   // The common case is a listen loop inside the window: answer from the one
   // read we already did instead of also looking the agent up.
   if (previous && input.at - previous.at < throttle) return { recorded: false };
-  const agent = await findAgentByName(client, name);
-  await writeJson(client, heartbeatKey(name), { at: input.at, ...(input.roomCode ? { roomCode: input.roomCode } : {}) });
+  let agent = await findAgentForRoomName(client, name);
+  if (!agent && input.registerIfUnknown) {
+    // Opt-in discovery: a listening seat nobody has entered in the roster is
+    // added as unassigned staff so the boss can name it, but it starts paused —
+    // work must never be auto-assigned to an agent nobody has defined. A
+    // decorated name is registered under its plain form, or every restart would
+    // add "Gemini (2)", then "Gemini (3)", as separate staff.
+    try {
+      agent = await upsertAgent(client, {
+        name: officeBaseName(name) || name,
+        role: 'Unassigned agent (discovered in a room)',
+        tags: [],
+        enabled: true,
+        paused: true,
+        requiresApproval: false,
+      }, 'system', input.at);
+    } catch {
+      agent = null;
+    }
+  }
+  // Both the name the room called this seat and the roster name it resolves to
+  // are stamped: the seat itself polls under the room name (that is the key the
+  // throttle above reads), and the dashboard polls under the roster name. One
+  // pipeline, so a decorated name costs one round trip, not two.
+  const stamp = { at: input.at, ...(input.roomCode ? { roomCode: input.roomCode } : {}) };
+  const stampNames = agent && agent.name.trim().toLowerCase() !== name.toLowerCase()
+    ? [name, agent.name]
+    : [name];
+  await client.pipeline(stampNames.map(stampName => ['SET', heartbeatKey(stampName), JSON.stringify(stamp)]));
   if (agent) {
     // Mirror the stamp onto the roster entry at heartbeat cadence, not on every
     // poll, so the dashboard's copy stays useful without a write per listen.
@@ -264,23 +308,7 @@ export async function recordAgentHeartbeat(
     }
     return { recorded: true, agentId: agent.id };
   }
-  if (!input.registerIfUnknown) return { recorded: true };
-  // Opt-in discovery: a listening seat nobody has entered in the roster is
-  // added as unassigned staff so the boss can name it, but it starts paused —
-  // work must never be auto-assigned to an agent nobody has defined.
-  try {
-    const created = await upsertAgent(client, {
-      name,
-      role: 'Unassigned agent (discovered in a room)',
-      tags: [],
-      enabled: true,
-      paused: true,
-      requiresApproval: false,
-    }, 'system', input.at);
-    return { recorded: true, agentId: created.id };
-  } catch {
-    return { recorded: true };
-  }
+  return { recorded: true };
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@
 // one waiting on the boss stands in the CEO office with a "!" over its head.
 // Nothing is guessed, so the floor never looks busier than the office is.
 import type { OfficeAgentView, OfficeOverview, OfficeTaskRef } from '@agent-room/shared';
+import { officeBaseName } from '@agent-room/shared';
 import {
   CEO_WAIT_SPOTS,
   LOUNGE_SPOTS,
@@ -40,7 +41,12 @@ export interface AgentScene {
   deskIndex: number;
 }
 
-const norm = (value: string) => value.trim().toLowerCase();
+const norm = (value: string) => officeBaseName(value).toLowerCase();
+
+// `norm` folds a decorated room name onto the staff member it belongs to: the
+// board records "Gemini (2)" after a rejoin and "망고 (총괄 매니저)" for the
+// manager, while the roster only knows the plain names. A pose or a bubble must
+// not disappear because the agent happened to be renamed in the room.
 
 /** Work this agent is holding that still asks the boss for a ruling. */
 export function approvalTasksFor(agent: Pick<OfficeAgentView, 'name'>, overview: Pick<OfficeOverview, 'approvals' | 'openTasks'>): OfficeTaskRef[] {
