@@ -225,7 +225,10 @@ export function IsoStage(props: IsoStageProps) {
   const [followId, setFollowId] = useState<string | null>(null);
   const followRef = useRef<string | null>(null);
   followRef.current = followId;
-  const [visible, setVisible] = useState<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
+  // What the minimap draws: the stage's viewfinder and where everyone is. It is
+  // state rather than a ref because it is HTML, and it refreshes four times a
+  // second instead of sixty.
+  const [mapFrame, setMapFrame] = useState<{ visible: { minX: number; minY: number; maxX: number; maxY: number }; agents: Array<{ id: string; at: IsoPoint; zone: IsoZoneId; needsBoss: boolean; rest: boolean }> } | null>(null);
   const visibleAtRef = useRef(0);
   const [hint, setHint] = useState<string | null>(null);
   const fullscreen = useStageFullscreen();
@@ -323,7 +326,16 @@ export function IsoStage(props: IsoStageProps) {
 
       if (now - visibleAtRef.current > 260) {
         visibleAtRef.current = now;
-        setVisible(visibleWorld(stageView));
+        setMapFrame({
+          visible: visibleWorld(stageView),
+          agents: liveRef.current.map(scene => ({
+            id: scene.agentId,
+            at: runnersRef.current.get(scene.agentId)?.pos ?? scene.spot,
+            zone: scene.zone,
+            needsBoss: scene.needsBoss,
+            rest: scene.rest,
+          })),
+        });
       }
 
       // The floor is painted once and then moved around as a picture. A pan or a
@@ -820,17 +832,22 @@ export function IsoStage(props: IsoStageProps) {
     return null;
   }, [agents, hover, tr]);
 
-  const minimapAgents = useMemo(() => planned.map(scene => {
-    const agent = agents.find(row => row.id === scene.agentId);
-    const reality = realityOf({
-      status: agent?.presence.status ?? 'idle',
-      enabled: agent?.enabled ?? true,
-      needsBoss: scene.needsBoss,
-      rest: scene.rest,
-      zone: scene.zone,
+  const minimapAgents = useMemo(() => {
+    const rows = mapFrame?.agents ?? planned.map(scene => ({
+      id: scene.agentId, at: scene.spot, zone: scene.zone, needsBoss: scene.needsBoss, rest: scene.rest,
+    }));
+    return rows.map(row => {
+      const agent = agents.find(item => item.id === row.id);
+      const reality = realityOf({
+        status: agent?.presence.status ?? 'idle',
+        enabled: agent?.enabled ?? true,
+        needsBoss: row.needsBoss,
+        rest: row.rest,
+        zone: row.zone,
+      });
+      return { id: row.id, at: row.at, color: realityColor(reality.kind), live: reality.live, selected: row.id === selectedId };
     });
-    return { id: scene.agentId, at: scene.spot, color: realityColor(reality.kind), live: reality.live, selected: scene.agentId === selectedId };
-  }), [agents, planned, selectedId]);
+  }, [agents, mapFrame, planned, selectedId]);
 
   const shellClass = full
     ? 'fixed inset-0 z-50 flex h-[100dvh] flex-col overflow-hidden bg-[#05080d]'
@@ -934,7 +951,7 @@ export function IsoStage(props: IsoStageProps) {
             <IsoMinimap
               agents={minimapAgents}
               ceo={ceoRef.current.pos}
-              visible={visible}
+              visible={mapFrame?.visible ?? null}
               width={stageWidth < 560 ? 96 : 138}
               height={stageWidth < 560 ? 72 : 104}
               label={tr('iso.minimap.title')}
