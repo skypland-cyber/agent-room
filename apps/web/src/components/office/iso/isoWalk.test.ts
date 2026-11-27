@@ -77,7 +77,14 @@ describe('where the boss may stand', () => {
   it('stays on the slab', () => {
     expect(isWalkable(-0.5, 8)).toBe(false);
     expect(isWalkable(22.5, 8)).toBe(false);
-    expect(isWalkable(10, 16.5)).toBe(false);
+    // The slab now runs down into the cafe wing: outside it is still outside.
+    expect(isWalkable(10, 21)).toBe(false);
+  });
+
+  it('can stand in the cafe, and cannot walk out of it into the air', () => {
+    expect(isWalkable(10.6, 15.4)).toBe(true);
+    expect(isWalkable(10.6, 18.8)).toBe(true);
+    expect(isWalkable(10.6, 20.6)).toBe(false);
   });
 
   it('will not walk into a desk', () => {
@@ -195,7 +202,7 @@ describe('every room can be walked to', () => {
     return seen;
   }
 
-  it('reaches all seven rooms from the CEO office', () => {
+  it('reaches all eight rooms from the CEO office', () => {
     const seen = reachable();
     const step = 0.125;
     for (const zone of ISO_ZONES) {

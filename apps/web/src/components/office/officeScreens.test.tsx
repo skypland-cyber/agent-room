@@ -83,7 +83,7 @@ const overview = {
 } satisfies OfficeOverview;
 
 describe('office screens render', () => {
-  it('renders the isometric control centre with its rooms and HUD', () => {
+  it('renders the virtual office in observation mode by default', () => {
     const html = renderToStaticMarkup(
       <ControlCenter
         overview={overview}
@@ -93,7 +93,39 @@ describe('office screens render', () => {
         onOpenTab={() => undefined}
       />,
     );
-    // The floor itself.
+    // The floor itself, full screen and without the management panels.
+    expect(html).toContain('<canvas');
+    expect(html).toContain('가상 오피스 관찰');
+    expect(html).toContain('AI 직원 5명');
+    expect(html).toContain('fixed inset-0');
+    // The game HUD: the camera, the minimap, the light, the way back to the menus.
+    expect(html).toContain('확대');
+    expect(html).toContain('축소');
+    expect(html).toContain('미니맵');
+    expect(html).toContain('관리 화면');
+    expect(html).toContain('전체화면');
+    // Real state and staged movement are counted and named apart.
+    expect(html).toContain('LIVE');
+    expect(html).toContain('연출');
+    // The management lists are not in this view.
+    expect(html).not.toContain('오늘의 업무');
+    expect(html).not.toContain('AI 직원 상태');
+    // The boss's own avatar is still walkable, pad and all.
+    expect(html).toContain('대표 이동 패드');
+    expect(html).toContain('위로 걷기');
+  });
+
+  it('renders the same floor beside the management panels when asked', () => {
+    const html = renderToStaticMarkup(
+      <ControlCenter
+        overview={overview}
+        onSelect={() => undefined}
+        onAddStaff={() => undefined}
+        onChanged={() => undefined}
+        onOpenTab={() => undefined}
+        initialMode="manage"
+      />,
+    );
     expect(html).toContain('<canvas');
     expect(html).toContain('AI 관제센터');
     expect(html).toContain('5명 근무'.slice(0, 3));
@@ -118,6 +150,7 @@ describe('office screens render', () => {
         onAddStaff={() => undefined}
         onChanged={() => undefined}
         onOpenTab={() => undefined}
+        initialMode="manage"
       />,
     );
     expect(emptyHtml).toContain('오피스가 비어 있습니다');

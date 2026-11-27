@@ -29,6 +29,8 @@ import {
   type IsoZone,
 } from './isoPlan.js';
 import type { IsoAgentScene } from './isoScene.js';
+import type { LightSpec } from './isoLight.js';
+import { realityColor, realityOf, type RealityInfo } from './isoReality.js';
 import type { IsoCeoScene } from './isoWalk.js';
 
 type Ctx = CanvasRenderingContext2D;
@@ -65,6 +67,30 @@ const TONE_COLORS: Record<string, string> = {
 
 export function toneColor(tone: string): string {
   return TONE_COLORS[tone] ?? TONE_COLORS.muted!;
+}
+
+/** Re-use a colour's channels at another alpha: how the light tints what it lights. */
+export function withAlpha(color: string, alpha: number): string {
+  const match = /^rgba?\(([^)]+)\)$/.exec(color);
+  if (!match) return color;
+  const parts = match[1]!.split(',').map(part => part.trim());
+  if (parts.length < 3) return color;
+  const a = Math.max(0, Math.min(1, alpha));
+  return `rgba(${parts[0]},${parts[1]},${parts[2]},${a})`;
+}
+
+/** Mix two hex colours, so a floor can be the same room at two hours of the day. */
+export function mixHex(from: string, to: string, t: number): string {
+  const parse = (hex: string) => {
+    const value = hex.replace('#', '');
+    if (value.length !== 6) return [0, 0, 0] as const;
+    return [Number.parseInt(value.slice(0, 2), 16), Number.parseInt(value.slice(2, 4), 16), Number.parseInt(value.slice(4, 6), 16)] as const;
+  };
+  const a = parse(from);
+  const b = parse(to);
+  const k = Math.max(0, Math.min(1, t));
+  const channel = (index: 0 | 1 | 2) => Math.round(a[index] + (b[index] - a[index]) * k).toString(16).padStart(2, '0');
+  return `#${channel(0)}${channel(1)}${channel(2)}`;
 }
 
 // ─── primitives ───────────────────────────────────────────────────────────
@@ -191,7 +217,7 @@ function isoEllipse(ctx: Ctx, point: IsoPoint, rx: number, ry: number, fill: str
 // ─── the room itself ──────────────────────────────────────────────────────
 
 /** Glass partition on a room's two far edges, cut open where the door is. */
-function paintWall(ctx: Ctx, zone: IsoZone): void {
+function paintWall(ctx: Ctx, zone: IsoZone, light: LightSpec): void {
   if (zone.wall <= 0) return;
   const [a, b, , d] = gridRectCorners(zone.rect);
   const doorway = zoneDoorway(zone);
@@ -200,6 +226,41 @@ function paintWall(ctx: Ctx, zone: IsoZone): void {
     { edge: 'y-' as const, from: a, to: b, span: zone.rect.w, dim: 1 },
     { edge: 'x-' as const, from: a, to: d, span: zone.rect.h, dim: 0.58 },
   ];
+
+  // The glazing: daylight comes through it in the morning, and after dark the room
+  // behind it is the one thing that is lit from the inside.
+  if (zone.windows) {
+    for (const { edge, from, to, span } of edges) {
+      const cut = doorway.edge === edge
+        ? [Math.max(0.02, (doorway.at - doorway.half) / Math.max(0.01, span)), Math.min(0.98, (doorway.at + doorway.half) / Math.max(0.01, span))]
+        : null;
+      const panes = 5;
+      for (let pane = 0; pane < panes; pane += 1) {
+        const t0 = (pane + 0.12) / panes;
+        const t1 = (pane + 0.88) / panes;
+        if (cut && !(t1 < cut[0]! || t0 > cut[1]!)) continue;
+        const q0 = { x: from.x + (to.x - from.x) * t0, y: from.y + (to.y - from.y) * t0 };
+        const q1 = { x: from.x + (to.x - from.x) * t1, y: from.y + (to.y - from.y) * t1 };
+        const top = height * 0.86;
+        const bottom = height * 0.2;
+        const pane0 = ctx.createLinearGradient(q0.x, q0.y - top, q0.x, q0.y - bottom);
+        pane0.addColorStop(0, light.windowSky);
+        pane0.addColorStop(1, withAlpha(light.windowGlow, 0.05));
+        ctx.save();
+        ctx.globalAlpha = 0.55 + light.windowGlowAlpha * 0.25;
+        ctx.beginPath();
+        ctx.moveTo(q0.x, q0.y - top);
+        ctx.lineTo(q1.x, q1.y - top);
+        ctx.lineTo(q1.x, q1.y - bottom);
+        ctx.lineTo(q0.x, q0.y - bottom);
+        ctx.closePath();
+        ctx.fillStyle = pane0;
+        ctx.fill();
+        ctx.restore();
+        void edge;
+      }
+    }
+  }
 
   for (const { edge, from, to, span, dim } of edges) {
     // The door is the one place this wall is not there. Its opening is quoted in
@@ -214,9 +275,9 @@ function paintWall(ctx: Ctx, zone: IsoZone): void {
       const p0 = { x: from.x + (to.x - from.x) * t0, y: from.y + (to.y - from.y) * t0 };
       const p1 = { x: from.x + (to.x - from.x) * t1, y: from.y + (to.y - from.y) * t1 };
       const grad = ctx.createLinearGradient(p0.x, p0.y - height, p0.x, p0.y);
-      grad.addColorStop(0, `rgba(176,222,255,${0.44 * dim})`);
-      grad.addColorStop(0.55, `rgba(133,190,246,${0.2 * dim})`);
-      grad.addColorStop(1, 'rgba(94,146,205,0.04)');
+      grad.addColorStop(0, withAlpha(light.glassTop, 0.5 * dim));
+      grad.addColorStop(0.55, withAlpha(light.glassTop, 0.22 * dim));
+      grad.addColorStop(1, withAlpha(light.glassBottom, 0.05));
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(p0.x, p0.y - height);
@@ -324,10 +385,10 @@ function paintThreshold(ctx: Ctx, zone: IsoZone): void {
   ctx.restore();
 }
 
-function paintZoneFloor(ctx: Ctx, zone: IsoZone): void {
+function paintZoneFloor(ctx: Ctx, zone: IsoZone, light: LightSpec): void {
   const center = gridToIso(zone.rect.x + zone.rect.w / 2, zone.rect.y + zone.rect.h / 2);
   // The plate itself: a touch lighter than the plaza, so a room reads as a room.
-  fillDiamond(ctx, zone.rect, '#20303f');
+  fillDiamond(ctx, zone.rect, mixHex('#20303f', '#33485c', light.dayness));
   // Alternating tiles: the cheapest way to say "floor" rather than "hole".
   ctx.save();
   for (let gy = Math.ceil(zone.rect.y); gy < zone.rect.y + zone.rect.h; gy += 1) {
@@ -340,7 +401,7 @@ function paintZoneFloor(ctx: Ctx, zone: IsoZone): void {
   }
   ctx.restore();
   const gradient = ctx.createRadialGradient(center.x, center.y, 2, center.x, center.y, Math.max(110, zone.rect.w * 30));
-  gradient.addColorStop(0, `${zone.accent}4d`);
+  gradient.addColorStop(0, `${zone.accent}${light.dayness > 0.6 ? '5a' : '4d'}`);
   gradient.addColorStop(0.6, `${zone.accent}16`);
   gradient.addColorStop(1, 'rgba(9,15,23,0)');
   diamondPath(ctx, zone.rect);
@@ -420,7 +481,7 @@ function paintZoneFloor(ctx: Ctx, zone: IsoZone): void {
   ctx.restore();
 }
 
-function paintSlab(ctx: Ctx): void {
+function paintSlab(ctx: Ctx, light: LightSpec): void {
   const box = ISO_BUILDING;
   const corners = gridRectCorners(box);
   // A shallow plinth so the floor reads as a built platform, not a floating sheet.
@@ -436,7 +497,7 @@ function paintSlab(ctx: Ctx): void {
     ctx.lineTo(to.x, to.y + depth);
     ctx.lineTo(from.x, from.y + depth);
     ctx.closePath();
-    ctx.fillStyle = ISO_COLORS.slabSide;
+    ctx.fillStyle = light.slabSide;
     ctx.fill();
   }
   ctx.beginPath();
@@ -449,7 +510,7 @@ function paintSlab(ctx: Ctx): void {
   ctx.fillStyle = '#070b11';
   ctx.fill();
 
-  fillDiamond(ctx, box, ISO_COLORS.slabTop);
+  fillDiamond(ctx, box, light.slabTop);
   ctx.save();
   ctx.shadowColor = 'rgba(56,189,248,0.62)';
   ctx.shadowBlur = 16;
@@ -792,7 +853,7 @@ function paintHoloPillar(ctx: Ctx, prop: IsoProp): void {
   ctx.restore();
 }
 
-function paintProp(ctx: Ctx, prop: IsoProp): void {
+function paintProp(ctx: Ctx, prop: IsoProp, light: LightSpec): void {
   const zone = ISO_ZONES.find(row => row.id === prop.zone);
   const accent = zone?.accent ?? '#22d3ee';
   const zoneForPaint = zone ?? { accent } as IsoZone;
@@ -803,18 +864,27 @@ function paintProp(ctx: Ctx, prop: IsoProp): void {
     case 'board': paintBoard(ctx, prop, zoneForPaint); break;
     case 'plant': paintPlant(ctx, prop); break;
     case 'sofa': paintSofa(ctx, prop); break;
+    case 'armchair': paintArmchair(ctx, prop); break;
     case 'shelf': paintShelf(ctx, prop); break;
+    case 'bookshelf': paintBookshelf(ctx, prop); break;
     case 'vault': paintVault(ctx, prop, zoneForPaint); break;
     case 'server': paintServer(ctx, prop, zoneForPaint); break;
     case 'rug': paintRug(ctx, prop); break;
     case 'mat': paintMat(ctx, prop); break;
     case 'counter': paintCounter(ctx, prop); break;
+    case 'barCounter': paintBarCounter(ctx, prop, light); break;
+    case 'espresso': paintEspresso(ctx, prop, light); break;
+    case 'cafeTable': paintCafeTable(ctx, prop); break;
+    case 'stool': paintStool(ctx, prop); break;
+    case 'pendant': paintPendant(ctx, prop, light); break;
+    case 'floorLamp': paintFloorLamp(ctx, prop, light); break;
+    case 'waterCooler': paintWaterCooler(ctx, prop); break;
     case 'table': paintBox(ctx, prop.rect, prop.height, { top: '#3b526c', left: '#1d2a38', right: '#27394b' }, 'rgba(168,190,214,0.3)'); break;
     case 'podTable': paintPodTable(ctx, prop); break;
     case 'podScreen': paintBoard(ctx, prop, zoneForPaint); break;
     case 'cabinet': paintBox(ctx, prop.rect, prop.height, { top: '#35485c', left: '#1b2731', right: '#233140' }, 'rgba(168,190,214,0.28)'); break;
     case 'chair': paintChair(ctx, prop); break;
-    case 'lamp': paintLamp(ctx, prop); break;
+    case 'lamp': paintLamp(ctx, prop, light); break;
     case 'holoPillar': paintHoloPillar(ctx, prop); break;
     default: paintBox(ctx, prop.rect, prop.height, { top: ISO_COLORS.metal, left: '#1c2734', right: '#22303e' }); break;
   }
@@ -852,7 +922,7 @@ function paintChair(ctx: Ctx, prop: IsoProp): void {
   paintBox(ctx, back, prop.height + 8, { top: '#3c5069', left: '#1f2c3b', right: '#2a3b4d' });
 }
 
-function paintLamp(ctx: Ctx, prop: IsoProp): void {
+function paintLamp(ctx: Ctx, prop: IsoProp, light: LightSpec): void {
   const center = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h / 2);
   ctx.save();
   ctx.strokeStyle = '#3b4b60';
@@ -862,8 +932,8 @@ function paintLamp(ctx: Ctx, prop: IsoProp): void {
   ctx.lineTo(center.x, center.y - prop.height);
   ctx.stroke();
   ctx.shadowColor = '#fcd34d';
-  ctx.shadowBlur = 12;
-  ctx.fillStyle = '#fcd34d';
+  ctx.shadowBlur = 12 * light.lamp;
+  ctx.fillStyle = light.lamp > 0.5 ? '#fcd34d' : '#c8b27a';
   ctx.beginPath();
   ctx.moveTo(center.x - 6, center.y - prop.height);
   ctx.lineTo(center.x + 6, center.y - prop.height);
@@ -879,6 +949,210 @@ function propDepth(prop: IsoProp): number {
   return prop.rect.x + prop.rect.w + prop.rect.y + prop.rect.h;
 }
 
+// ─── the cafe, the lounge and the things that make them a place ────────────
+
+/** A lounge chair: a seat, a back and a cushion, for the corner of the cafe. */
+function paintArmchair(ctx: Ctx, prop: IsoProp): void {
+  paintBox(ctx, prop.rect, prop.height, { top: '#4a5f77', left: '#233142', right: '#2f4155' }, 'rgba(178,204,228,0.34)');
+  const back = { x: prop.rect.x + prop.rect.w * 0.08, y: prop.rect.y + prop.rect.h * 0.06, w: prop.rect.w * 0.84, h: prop.rect.h * 0.3 };
+  paintBox(ctx, back, prop.height + 7, { top: '#54697f', left: '#263444', right: '#324356' });
+  // Two arms, so it reads as a chair and not as another sofa.
+  for (const side of [0, 1]) {
+    const arm = { x: side === 0 ? prop.rect.x : prop.rect.x + prop.rect.w - 0.14, y: prop.rect.y, w: 0.14, h: prop.rect.h };
+    paintBox(ctx, arm, prop.height + 3, { top: '#51667c', left: '#243141', right: '#304152' });
+  }
+  const cushion = { x: prop.rect.x + prop.rect.w * 0.3, y: prop.rect.y + prop.rect.h * 0.42, w: prop.rect.w * 0.4, h: prop.rect.h * 0.3 };
+  fillDiamond(ctx, cushion, 'rgba(251,191,36,0.18)', prop.height + 1);
+}
+
+/** The espresso bar: a long counter with a brass rail and its own glow. */
+function paintBarCounter(ctx: Ctx, prop: IsoProp, light: LightSpec): void {
+  paintBox(ctx, prop.rect, prop.height, { top: '#4a3a2c', left: '#241c15', right: '#33261b' }, 'rgba(251,146,60,0.55)');
+  // The top's front lip: warmer than the body, as a bar top is.
+  const lip = { x: prop.rect.x, y: prop.rect.y + prop.rect.h - 0.12, w: prop.rect.w, h: 0.12 };
+  paintBox(ctx, lip, prop.height + 1, { top: '#6a5236', left: '#332618', right: '#46331f' });
+  const center = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h / 2);
+  if (light.lamp > 0.2) {
+    floorGlow(ctx, { x: center.x, y: center.y - prop.height + 6 }, 90, withAlpha(light.windowGlow, 0.5), 0.4 * light.lamp);
+  }
+  // A row of cups along the bar.
+  ctx.save();
+  for (let cup = 0; cup < 5; cup += 1) {
+    const point = gridToIso(prop.rect.x + 0.5 + cup * 1.1, prop.rect.y + prop.rect.h * 0.4);
+    ctx.fillStyle = '#e7eef7';
+    ctx.fillRect(point.x - 1.2, point.y - prop.height - 2.6, 2.4, 2.6);
+  }
+  ctx.restore();
+}
+
+/** The espresso machine: a steel box, a group head, and steam when it is busy. */
+function paintEspresso(ctx: Ctx, prop: IsoProp, light: LightSpec): void {
+  paintBox(ctx, prop.rect, prop.height, { top: '#6b7686', left: '#2c343f', right: '#3b4653' }, 'rgba(226,240,255,0.65)');
+  const [a, b, c] = gridRectCorners(prop.rect);
+  const front = { x: b.x + (c.x - b.x) * 0.5, y: b.y + (c.y - b.y) * 0.5 };
+  ctx.save();
+  // Group head and its two spouts.
+  ctx.fillStyle = '#c9d3df';
+  ctx.fillRect(front.x - 4.5, front.y - prop.height * 0.55, 9, 3);
+  ctx.fillStyle = '#9aa6b4';
+  ctx.fillRect(front.x - 3.4, front.y - prop.height * 0.55 + 3, 2, 4);
+  ctx.fillRect(front.x + 1.4, front.y - prop.height * 0.55 + 3, 2, 4);
+  // The pressure gauge, and the little amber light that says it is on.
+  ctx.beginPath();
+  ctx.arc(front.x, front.y - prop.height * 0.78, 2.6, 0, Math.PI * 2);
+  ctx.fillStyle = '#e8eef6';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(60,72,88,0.8)';
+  ctx.lineWidth = 0.6;
+  ctx.stroke();
+  ctx.shadowColor = '#fb923c';
+  ctx.shadowBlur = 6 * Math.max(0.4, light.lamp);
+  ctx.fillStyle = '#fb923c';
+  ctx.beginPath();
+  ctx.arc(front.x + 6, front.y - prop.height * 0.42, 1.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  // Steam: two soft curls above the machine, always, because it is always warm.
+  const top = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h * 0.2);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(236,246,255,0.22)';
+  ctx.lineWidth = 1.4;
+  for (const offset of [-3, 3]) {
+    ctx.beginPath();
+    ctx.moveTo(top.x + offset, top.y - prop.height);
+    ctx.bezierCurveTo(top.x + offset + 4, top.y - prop.height - 7, top.x + offset - 4, top.y - prop.height - 12, top.x + offset, top.y - prop.height - 18);
+    ctx.stroke();
+  }
+  ctx.restore();
+  floorGlow(ctx, { x: top.x, y: top.y }, 34, 'rgba(251,146,60,0.35)', 0.3 + light.lamp * 0.25);
+}
+
+/** A cafe table: a round top on a stem, with two cups on it. */
+function paintCafeTable(ctx: Ctx, prop: IsoProp): void {
+  const center = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h / 2);
+  const radius = Math.min(prop.rect.w, prop.rect.h) * 0.5;
+  // Stem.
+  ctx.save();
+  ctx.fillStyle = '#3a4553';
+  ctx.fillRect(center.x - 1, center.y - prop.height + 2, 2, prop.height - 2);
+  ctx.restore();
+  // Top.
+  fillDiamond(ctx, prop.rect, '#6f5a43', prop.height);
+  strokeDiamond(ctx, prop.rect, 'rgba(255,214,170,0.55)', 0.9, prop.height);
+  void radius;
+  // Two cups and a paper.
+  ctx.save();
+  ctx.fillStyle = '#eef4fb';
+  ctx.fillRect(center.x - 5, center.y - prop.height - 3, 3, 3);
+  ctx.fillRect(center.x + 2, center.y - prop.height - 3, 3, 3);
+  ctx.fillStyle = 'rgba(240,246,252,0.4)';
+  ctx.fillRect(center.x - 2, center.y - prop.height - 1.5, 6, 1.5);
+  ctx.restore();
+  floorGlow(ctx, { x: center.x, y: center.y }, 18, 'rgba(251,191,36,0.18)', 0.35);
+}
+
+/** A stool: a small seat on four thin legs. */
+function paintStool(ctx: Ctx, prop: IsoProp): void {
+  const center = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h / 2);
+  ctx.save();
+  ctx.strokeStyle = '#46525f';
+  ctx.lineWidth = 1;
+  for (const [dx, dy] of [[-2, 1], [2, 1], [-2, -1], [2, -1]] as const) {
+    ctx.beginPath();
+    ctx.moveTo(center.x + dx, center.y + dy + 1);
+    ctx.lineTo(center.x + dx * 0.5, center.y - prop.height + 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+  fillDiamond(ctx, { x: prop.rect.x, y: prop.rect.y, w: prop.rect.w, h: prop.rect.h * 0.7 }, '#5b6a7c', prop.height);
+  strokeDiamond(ctx, { x: prop.rect.x, y: prop.rect.y, w: prop.rect.w, h: prop.rect.h * 0.7 }, 'rgba(190,210,230,0.4)', 0.6, prop.height);
+}
+
+/** A pendant lamp: a cord from the ceiling, a cone, and a pool of warm light. */
+function paintPendant(ctx: Ctx, prop: IsoProp, light: LightSpec): void {
+  const center = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h / 2);
+  const top = center.y - prop.height;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(148,163,184,0.35)';
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(center.x, top - 12);
+  ctx.lineTo(center.x, top);
+  ctx.stroke();
+  // The cone, seen from below: a wide shallow diamond with a lit rim.
+  ctx.shadowColor = withAlpha(light.windowGlow, 0.9);
+  ctx.shadowBlur = 10 * Math.max(0.25, light.lamp);
+  ctx.beginPath();
+  ctx.moveTo(center.x - 8, top + 5);
+  ctx.lineTo(center.x, top - 3);
+  ctx.lineTo(center.x + 8, top + 5);
+  ctx.closePath();
+  ctx.fillStyle = light.lamp > 0.5 ? '#ffd89b' : '#b9c3cf';
+  ctx.fill();
+  ctx.restore();
+  if (light.lamp > 0.15) {
+    floorGlow(ctx, { x: center.x, y: center.y + 4 }, 46, withAlpha(light.windowGlow, 0.55), 0.32 * light.lamp);
+  }
+}
+
+/** A standing lamp in a corner: a tall stem and a warm shade. */
+function paintFloorLamp(ctx: Ctx, prop: IsoProp, light: LightSpec): void {
+  const center = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h / 2);
+  ctx.save();
+  ctx.strokeStyle = '#4a5766';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(center.x, center.y);
+  ctx.lineTo(center.x, center.y - prop.height);
+  ctx.stroke();
+  ctx.shadowColor = withAlpha(light.windowGlow, 0.9);
+  ctx.shadowBlur = 12 * Math.max(0.2, light.lamp);
+  ctx.beginPath();
+  ctx.moveTo(center.x - 7, center.y - prop.height + 2);
+  ctx.lineTo(center.x + 7, center.y - prop.height + 2);
+  ctx.lineTo(center.x + 4, center.y - prop.height - 7);
+  ctx.lineTo(center.x - 4, center.y - prop.height - 7);
+  ctx.closePath();
+  ctx.fillStyle = light.lamp > 0.5 ? '#ffe0ad' : '#aab6c4';
+  ctx.fill();
+  ctx.restore();
+  if (light.lamp > 0.15) floorGlow(ctx, { x: center.x, y: center.y + 2 }, 52, withAlpha(light.windowGlow, 0.45), 0.3 * light.lamp);
+}
+
+/** A water cooler: the one thing every office has and nobody draws. */
+function paintWaterCooler(ctx: Ctx, prop: IsoProp): void {
+  paintBox(ctx, prop.rect, prop.height * 0.55, { top: '#d7e3ee', left: '#9fb0c2', right: '#b7c6d6' }, 'rgba(230,244,255,0.55)');
+  const center = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h / 2);
+  ctx.save();
+  ctx.fillStyle = 'rgba(125,211,252,0.45)';
+  ctx.beginPath();
+  ctx.ellipse(center.x, center.y - prop.height * 0.55 - 2, 4.2, 5.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+/** A low bookshelf: spines in a few colours, because a shelf of blank boxes is a wall. */
+function paintBookshelf(ctx: Ctx, prop: IsoProp): void {
+  paintBox(ctx, prop.rect, prop.height, { top: '#3a4b5f', left: '#1d2732', right: '#263340' }, 'rgba(168,190,214,0.28)');
+  const [a, b, c, d] = gridRectCorners(prop.rect);
+  const face = { x: (b.x + c.x) / 2, y: (b.y + c.y) / 2 };
+  const faceW = Math.abs(d.x - c.x);
+  ctx.save();
+  const spines = ['#ef8354', '#5c9ead', '#e0c879', '#8f7ab8', '#7fb069'];
+  for (let shelf = 0; shelf < 3; shelf += 1) {
+    const y = face.y - prop.height * 0.25 - shelf * prop.height * 0.28;
+    ctx.fillStyle = 'rgba(8,14,22,0.55)';
+    ctx.fillRect(face.x - faceW / 2, y, faceW, 1.2);
+    for (let spine = 0; spine < 5; spine += 1) {
+      ctx.fillStyle = spines[(spine + shelf) % spines.length]!;
+      const w = faceW / 6;
+      ctx.fillRect(face.x - faceW / 2 + spine * w + 0.5, y - 4, Math.max(1, w - 1), 4);
+    }
+  }
+  void a;
+  ctx.restore();
+}
+
 // ─── the static pass ──────────────────────────────────────────────────────
 
 export interface PaintOptions {
@@ -887,6 +1161,8 @@ export interface PaintOptions {
   height: number;
   /** Device pixels per CSS pixel. Every pass starts from identity and applies this. */
   dpr: number;
+  /** The light in the room: night, day, or the hour in between. */
+  light: LightSpec;
 }
 
 function applyWorld(ctx: Ctx, view: IsoView): void {
@@ -896,14 +1172,14 @@ function applyWorld(ctx: Ctx, view: IsoView): void {
 }
 
 export function paintStatic(ctx: Ctx, options: PaintOptions): void {
-  const { view, width, height, dpr } = options;
+  const { view, width, height, dpr, light } = options;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width * dpr, height * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   const sky = ctx.createLinearGradient(0, 0, 0, height);
-  sky.addColorStop(0, ISO_COLORS.voidTop);
-  sky.addColorStop(1, ISO_COLORS.voidBottom);
+  sky.addColorStop(0, light.skyTop);
+  sky.addColorStop(1, light.skyBottom);
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, width, height);
 
@@ -912,24 +1188,31 @@ export function paintStatic(ctx: Ctx, options: PaintOptions): void {
 
   // A wide halo under the building, then the platform.
   const center = gridToIso(ISO_BUILDING.w / 2, ISO_BUILDING.h / 2);
-  floorGlow(ctx, center, 620, 'rgba(56,189,248,0.20)', 0.5);
+  floorGlow(ctx, center, 700, 'rgba(56,189,248,0.20)', 0.5);
   // Room light from above: one soft overhead wash, so the floor has air over it.
-  const over = ctx.createRadialGradient(center.x, center.y - 120, 40, center.x, center.y - 60, 760);
-  over.addColorStop(0, 'rgba(186,220,255,0.09)');
+  const over = ctx.createRadialGradient(center.x, center.y - 120, 40, center.x, center.y - 60, 820);
+  over.addColorStop(0, `rgba(186,220,255,${0.06 + light.dayness * 0.06})`);
   over.addColorStop(0.45, 'rgba(120,170,230,0.04)');
   over.addColorStop(1, 'rgba(8,15,25,0)');
   ctx.fillStyle = over;
   ctx.beginPath();
-  ctx.ellipse(center.x, center.y - 40, 860, 500, 0, 0, Math.PI * 2);
+  ctx.ellipse(center.x, center.y - 40, 940, 560, 0, 0, Math.PI * 2);
   ctx.fill();
-  paintSlab(ctx);
+  paintSlab(ctx, light);
 
-  for (const zone of ISO_ZONES) paintZoneFloor(ctx, zone);
+  for (const zone of ISO_ZONES) paintZoneFloor(ctx, zone, light);
   for (const zone of ISO_ZONES) paintThreshold(ctx, zone);
-  for (const zone of ISO_ZONES) paintWall(ctx, zone);
+  for (const zone of ISO_ZONES) paintWall(ctx, zone, light);
 
   const ordered = [...ISO_PROPS].sort((a, b) => propDepth(a) - propDepth(b));
-  for (const prop of ordered) paintProp(ctx, prop);
+  for (const prop of ordered) paintProp(ctx, prop, light);
+
+  // The hour itself, laid over the floor: a blue cast after dark, a warm lift at
+  // noon. The furniture is painted first so the light falls on it too.
+  ctx.save();
+  ctx.globalAlpha = 1;
+  fillDiamond(ctx, ISO_BUILDING, withAlpha(light.wash, light.washAlpha));
+  ctx.restore();
 
   ctx.restore();
 
@@ -937,7 +1220,7 @@ export function paintStatic(ctx: Ctx, options: PaintOptions): void {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const vignette = ctx.createRadialGradient(width / 2, height / 2, Math.min(width, height) * 0.24, width / 2, height / 2, Math.max(width, height) * 0.78);
   vignette.addColorStop(0, 'rgba(0,0,0,0)');
-  vignette.addColorStop(1, 'rgba(2,5,9,0.42)');
+  vignette.addColorStop(1, `rgba(2,5,9,${0.42 - light.dayness * 0.14})`);
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, width, height);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -952,6 +1235,10 @@ export interface AgentPaint {
   palette: Palette;
   /** The boss: gold ring on the floor, a crown on the head. */
   owner?: boolean;
+  /** Is this a fact or a piece of theatre? Everything downstream reads this. */
+  reality: RealityInfo;
+  /** Walking right now: the leg stride and the bob belong to a moving person. */
+  walking?: boolean;
 }
 
 function characterHeight(pose: IsoAgentScene['pose']): number {
@@ -968,10 +1255,11 @@ function drawCharacter(ctx: Ctx, point: IsoPoint, paint: AgentPaint, timeMs: num
   const { scene, palette } = paint;
   const seated = scene.pose === 'type' || scene.pose === 'sit';
   const asleep = scene.pose === 'sleep';
-  const stride = walking && !seated ? Math.sin(timeMs / 78) : 0;
+  const moving = Boolean(paint.walking) && !seated;
+  const stride = moving ? Math.sin(timeMs / 78) : 0;
   const bob = asleep
     ? Math.sin(timeMs / 900 + index) * 0.4
-    : walking
+    : moving
       ? Math.abs(Math.sin(timeMs / 78)) * 1.1
       : Math.sin(timeMs / 620 + index * 1.7) * (seated ? 0.5 : 1.2);
   const height = characterHeight(scene.pose);
@@ -1075,11 +1363,34 @@ function drawCharacter(ctx: Ctx, point: IsoPoint, paint: AgentPaint, timeMs: num
   ctx.arc(point.x, headY, headR + 0.4, 0, Math.PI * 2);
   ctx.fillStyle = palette.hair;
   ctx.fill();
+  // Hair that is not a circle: a fringe, a long fall, or a bun. Four silhouettes
+  // are enough for a floor of six people to read as six people.
+  if (!facingBack && palette.hairStyle === 2) {
+    ctx.fillRect(point.x - headR - 0.4, headY - 1, 1.6, headR + 5);
+    ctx.fillRect(point.x + headR - 1.2, headY - 1, 1.6, headR + 5);
+  }
+  if (palette.hairStyle === 3) {
+    ctx.beginPath();
+    ctx.arc(point.x, headY - headR - 1.4, 2.4, 0, Math.PI * 2);
+    ctx.fillStyle = palette.hairDark;
+    ctx.fill();
+  }
   if (!facingBack) {
     ctx.beginPath();
     ctx.ellipse(point.x, headY + 1.1, headR * 0.86, headR * 0.76, 0, 0, Math.PI * 2);
     ctx.fillStyle = asleep ? palette.skinDark : palette.skin;
     ctx.fill();
+    if (palette.hairStyle === 1) {
+      // A side part, swept across the forehead.
+      ctx.beginPath();
+      ctx.moveTo(point.x - headR * 0.9, headY - 1.4);
+      ctx.quadraticCurveTo(point.x, headY - 4.4, point.x + headR * 0.9, headY - 1.2);
+      ctx.lineTo(point.x + headR * 0.5, headY - 0.2);
+      ctx.quadraticCurveTo(point.x, headY - 2.6, point.x - headR * 0.6, headY + 0.2);
+      ctx.closePath();
+      ctx.fillStyle = palette.hair;
+      ctx.fill();
+    }
     const look = scene.facing === 'left' ? -1.2 : scene.facing === 'right' ? 1.2 : 0;
     ctx.fillStyle = '#141c26';
     if (asleep) {
@@ -1088,6 +1399,13 @@ function drawCharacter(ctx: Ctx, point: IsoPoint, paint: AgentPaint, timeMs: num
     } else {
       ctx.fillRect(point.x - 2.4 + look, headY + 0.2, 1.5, 1.6);
       ctx.fillRect(point.x + 1.0 + look, headY + 0.2, 1.5, 1.6);
+      if (palette.glasses) {
+        // Rimless rectangles: at this size a frame is two light lines.
+        ctx.strokeStyle = 'rgba(226,240,255,0.75)';
+        ctx.lineWidth = 0.6;
+        ctx.strokeRect(point.x - 3.2 + look, headY - 0.4, 2.8, 2.6);
+        ctx.strokeRect(point.x + 0.5 + look, headY - 0.4, 2.8, 2.6);
+      }
     }
   }
 
@@ -1165,8 +1483,10 @@ function drawCeo(ctx: Ctx, ceo: IsoCeoScene, timeMs: number, label: string): voi
     status: 'owner',
     palette: BOSS_PALETTE,
     owner: true,
+    reality: { kind: 'working', live: true, labelKey: 'iso.reality.owner', chipKey: 'iso.chip.live', tone: 'warn', resting: false },
+    walking: ceo.moving,
   };
-  drawCharacter(ctx, { x: point.x, y: point.y - 1 }, paint, timeMs, 0, false, ceo.moving);
+  drawCharacter(ctx, { x: point.x, y: point.y - 1 }, paint, timeMs, 0, false);
 }
 
 export interface FrameOptions {
@@ -1175,7 +1495,7 @@ export interface FrameOptions {
   height: number;
   dpr: number;
   scenes: IsoAgentScene[];
-  agents: Array<{ id: string; name: string; status: string }>;
+  agents: Array<{ id: string; name: string; status: string; enabled?: boolean }>;
   selectedId?: string;
   hoveredId?: string;
   hoveredZone?: string | null;
@@ -1191,6 +1511,10 @@ export interface FrameOptions {
   ceo?: IsoCeoScene | null;
   /** The word on the boss's tag, already localised. */
   ownerLabel?: string;
+  /** Who has both feet off the ground right now: they get the walking stride. */
+  movingIds?: string[];
+  /** The tags' little chip: LIVE for a fact, 연출 for theatre. */
+  chipLabels?: { live: string; anim: string };
 }
 
 export function paintFrame(ctx: Ctx, options: FrameOptions): void {
@@ -1204,7 +1528,14 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
   scenes.forEach((scene, index) => {
     const agent = agents.find(row => row.id === scene.agentId);
     if (!agent) return;
-    paints.push({ scene, name: agent.name, status: agent.status, palette: paletteFor(agent.name, index) });
+    paints.push({
+      scene,
+      name: agent.name,
+      status: agent.status,
+      palette: paletteFor(agent.name, index),
+      reality: realityOf({ status: agent.status, enabled: agent.enabled ?? true, needsBoss: scene.needsBoss, rest: scene.rest, zone: scene.zone }),
+      walking: options.movingIds?.includes(scene.agentId) ?? false,
+    });
   });
 
   // Room hover: a faint wash over the whole room, drawn under the people.
@@ -1235,7 +1566,6 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
     drawCharacter(ctx, { x: point.x, y: point.y - 1 }, paint, timeMs, figure.index, selectedId === paint.scene.agentId);
   }
   ctx.restore();
-
   // ── screen space: tags, bubbles, the "!" ───────────────────────────────
   // From here on the canvas is back in CSS pixels, so a name tag is real pixels
   // whether the floor is fitted to a phone or filling a desktop screen.
@@ -1243,7 +1573,7 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
   const toScreen = (point: IsoPoint) => worldToScreen(view, point);
 
   if (plan.showRoomLabels) {
-    for (const label of options.labels ?? []) drawRoomLabel(ctx, label);
+    for (const label of options.labels ?? []) drawRoomLabel(ctx, label, width, height);
   }
 
   // Bubbles first, so tags sit on top of them where they overlap. Every speaker
@@ -1303,12 +1633,14 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
     const scene = paint.scene;
     const point = toScreen(gridToIso(scene.spot.x, scene.spot.y));
     const text = shortName(paint.name);
+    const chip = paint.reality.live ? (options.chipLabels?.live ?? 'LIVE') : (options.chipLabels?.anim ?? '~');
     tagRequests.push({
       id: scene.agentId,
       x: point.x,
       y: point.y - characterHeight(scene.pose) * view.scale - 6,
       text,
-      width: tagWidth(measureWith(ctx, metrics.tag.font), text, metrics),
+      chip,
+      width: tagWidth(measureWith(ctx, metrics.tag.font), text, metrics, chip),
       height: metrics.tag.height,
     });
   }
@@ -1321,15 +1653,14 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
     if (!tag) continue;
     const highlight = selectedId === scene.agentId || hoveredId === scene.agentId;
     if (scene.needsBoss) drawNeedsBoss(ctx, tag.left + tag.width + 8, tag.top + tag.height / 2, timeMs);
-    drawNameTag(ctx, tag, paint, highlight, metrics);
+    drawNameTag(ctx, tag, paint, highlight, metrics, options.chipLabels ?? { live: 'LIVE', anim: '~' });
     if (options.ceo?.greetId === scene.agentId) drawWave(ctx, tag.left - 9, tag.top + tag.height / 2, timeMs);
-  }
-  const ownTag = tags.get('ceo');
+  }  const ownTag = tags.get('ceo');
   if (ownTag) drawOwnerTag(ctx, ownTag, options.ownerLabel ?? 'CEO', metrics, timeMs);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
-function drawRoomLabel(ctx: Ctx, label: FrameLabel): void {
+function drawRoomLabel(ctx: Ctx, label: FrameLabel, stageWidth: number, stageHeight: number): void {
   ctx.save();
   ctx.font = '700 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
   const valueText = label.value && label.value > 0 ? String(label.value) : '';
@@ -1337,8 +1668,10 @@ function drawRoomLabel(ctx: Ctx, label: FrameLabel): void {
   const valueWidth = valueText ? ctx.measureText(valueText).width : 0;
   const width = Math.round(textWidth + valueWidth + (valueText ? 20 : 16));
   const height = 16;
-  const left = Math.round(label.point.x - width / 2);
-  const top = Math.round(label.point.y - height / 2);
+  // A room in the corner of the floor would otherwise hang its sign off the
+  // stage, so the plate is kept inside the picture it belongs to.
+  const left = Math.round(Math.max(3, Math.min(stageWidth - 3 - width, label.point.x - width / 2)));
+  const top = Math.round(Math.max(3, Math.min(stageHeight - 3 - height, label.point.y - height / 2)));
   pill(ctx, left, top, width, height, 8);
   ctx.fillStyle = 'rgba(7,12,19,0.78)';
   ctx.fill();
@@ -1385,27 +1718,46 @@ function drawNeedsBoss(ctx: Ctx, x: number, y: number, timeMs: number): void {
   ctx.restore();
 }
 
-function drawNameTag(ctx: Ctx, tag: TagPlacement, paint: AgentPaint, highlight: boolean, metrics: FrameTextMetrics): void {
+function drawNameTag(ctx: Ctx, tag: TagPlacement, paint: AgentPaint, highlight: boolean, metrics: FrameTextMetrics, chips: { live: string; anim: string }): void {
   ctx.save();
-  ctx.globalAlpha = paint.scene.alpha;
-  ctx.font = metrics.tag.font;
   const row = metrics.tag;
+  const live = paint.reality.live;
+  // A resting agent's tag is drawn like a note, not like a badge: lower alpha, a
+  // dashed edge and the 연출 chip. That dashed edge is the one thing a glance
+  // away from the screen still tells apart from a live status.
+  ctx.globalAlpha = paint.scene.alpha * (live ? 1 : 0.78);
+  ctx.font = row.font;
   pill(ctx, tag.left, tag.top, tag.width, tag.height, row.radius);
-  ctx.fillStyle = highlight ? 'rgba(15,32,47,0.96)' : 'rgba(9,16,25,0.86)';
+  ctx.fillStyle = highlight ? 'rgba(15,32,47,0.96)' : live ? 'rgba(9,16,25,0.9)' : 'rgba(9,16,25,0.62)';
   ctx.fill();
-  ctx.strokeStyle = highlight ? 'rgba(125,211,252,0.95)' : 'rgba(160,182,206,0.34)';
+  if (!live) ctx.setLineDash([2.5, 2]);
+  ctx.strokeStyle = highlight ? 'rgba(125,211,252,0.95)' : live ? 'rgba(160,182,206,0.5)' : 'rgba(148,163,184,0.62)';
   ctx.lineWidth = 1;
   ctx.stroke();
+  ctx.setLineDash([]);
   // Status dot: the same five colours the roster uses.
   ctx.beginPath();
   ctx.arc(tag.left + 6, tag.top + tag.height / 2, row.dot, 0, Math.PI * 2);
-  ctx.fillStyle = statusColor(paint.status);
+  ctx.fillStyle = realityColor(paint.reality.kind);
   ctx.fill();
-  ctx.fillStyle = highlight ? '#ffffff' : '#d8e4f0';
+  ctx.fillStyle = highlight ? '#ffffff' : live ? '#d8e4f0' : '#a9bccd';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.font = row.font;
   ctx.fillText(shortName(paint.name), tag.left + row.padX, tag.top + tag.height / 2 + 0.5);
+
+  // The chip: LIVE for a fact, 연출 for theatre. One word, always in the same place.
+  const chipText = live ? chips.live : chips.anim;
+  const chipW = Math.round(ctx.measureText(chipText).width) + 7;
+  const chipH = Math.max(7, tag.height - 4);
+  const chipX = tag.left + tag.width - chipW - 3;
+  const chipY = tag.top + (tag.height - chipH) / 2;
+  pill(ctx, chipX, chipY, chipW, chipH, chipH / 2);
+  ctx.fillStyle = live ? 'rgba(56,189,248,0.24)' : 'rgba(148,163,184,0.18)';
+  ctx.fill();
+  ctx.fillStyle = live ? '#9fe0ff' : '#b6c6d5';
+  ctx.textAlign = 'center';
+  ctx.fillText(chipText, chipX + chipW / 2, chipY + chipH / 2 + 0.3);
   ctx.restore();
 }
 
@@ -1660,6 +2012,8 @@ export interface TagRequest {
   x: number;
   y: number;
   text: string;
+  /** The small chip after the name: LIVE, or 연출. */
+  chip?: string;
   width: number;
   height: number;
 }
@@ -1672,9 +2026,10 @@ export interface TagPlacement {
   height: number;
 }
 
-/** The width a tag needs, from the metrics and the text. */
-export function tagWidth(widthOf: (text: string) => number, text: string, metrics: FrameTextMetrics): number {
-  return Math.max(24, Math.round(widthOf(text) + metrics.tag.padX * 2));
+/** The width a tag needs, from the metrics, the text and its chip. */
+export function tagWidth(widthOf: (text: string) => number, text: string, metrics: FrameTextMetrics, chip = ''): number {
+  const chipWidth = chip ? Math.round(widthOf(chip)) + 8 : 0;
+  return Math.max(24, Math.round(widthOf(text) + metrics.tag.padX * 2 + chipWidth));
 }
 
 /** A name that fits a tag: eleven characters and an ellipsis is plenty. */
