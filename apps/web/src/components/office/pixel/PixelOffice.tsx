@@ -19,18 +19,26 @@ import {
   deskSlots,
   tileAtPixel,
   tileCenter,
+  type DeskSlot,
 } from './officeMap.js';
 import { buildOfficeGrid, findPath, isOpen, nearestOpen, simplifyPath, type Point, type WalkGrid } from './pathfind.js';
-import { BOSS_PALETTE, paletteFor } from './palette.js';
-import { drawBubble, drawCharacter, drawDesk, drawMoveMarker, drawNameTag, drawNeedsBoss, type Facing } from './paintChars.js';
+import { BOSS_PALETTE, paletteFor, type Palette } from './palette.js';
+import { BUBBLE_FONT, drawBubbleAt, drawCharacter, drawDesk, drawMoveMarker, drawNameTag, drawNeedsBoss, type Facing } from './paintChars.js';
+import { BUBBLE_LIFT, layoutBubbles, type BubblePlacement } from './bubbleLayout.js';
 import { buildStaticLayer } from './paintScene.js';
-import { planScenes, type AgentScene } from './scene.js';
+import { planScenes, type AgentScene, type SceneZone } from './scene.js';
 import { OfficeAgentPanel } from './OfficeAgentPanel.js';
 import { t, useI18n, type MessageKey } from '../../../i18n/index.js';
 import { presenceCounts } from '../../../i18n/labels.js';
 
 const WALK_SPEED = 74; // px per second for the boss
 const STAFF_SPEED = 46;
+/** Someone called back from a break crosses the office at this multiple of the stroll. */
+const HURRY_FACTOR = 2.4;
+/** How often the clock-driven plan (rest rotation, chatter) is re-read, in ms. */
+const PLAN_REFRESH_MS = 250;
+/** The zones an idle agent rests in. Leaving one for work is what makes it hurry. */
+const REST_ZONES: ReadonlySet<SceneZone> = new Set<SceneZone>(['pantry', 'lounge']);
 const BODY_HALF_WIDTH = 4;
 const BODY_HEIGHT = 5;
 
@@ -42,6 +50,9 @@ interface Runner {
   frame: number;
   moving: boolean;
   goal: string;
+  /** The zone it is heading for, so a walk from a rest spot back to work can hurry. */
+  zone: SceneZone | null;
+  hurry: boolean;
 }
 
 const key = (tile: Point) => `${tile.x},${tile.y}`;
@@ -55,7 +66,7 @@ const WALK_LABELS: Record<string, MessageKey> = {
 };
 
 function createRunner(x: number, y: number, facing: Facing = 'down'): Runner {
-  return { x, y, path: [], facing, frame: 0, moving: false, goal: '' };
+  return { x, y, path: [], facing, frame: 0, moving: false, goal: '', zone: null, hurry: false };
 }
 
 /** Can the body stand with its feet at this pixel? Axis-separated, so walls slide. */
@@ -163,6 +174,8 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
   const playerRef = useRef<Runner>(createRunner(SPAWN.x, SPAWN.y, 'down'));
   const staffRef = useRef(new Map<string, Runner>());
   const sceneRef = useRef<AgentScene[]>([]);
+  /** The plan the clock drives: idle staff drifting and chatting. Re-planned in the loop. */
+  const liveRef = useRef<AgentScene[]>([]);
   const cameraRef = useRef({ x: 0, y: 0, scale: 0.5, ready: false });
   const tapRef = useRef<{ x: number; y: number; at: number } | null>(null);
   const touchRef = useRef({ x: 0, y: 0 });
@@ -230,43 +243,88 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
 
     const tick = Math.floor(timeMs / 130);
     const desks = deskSlots(agents.length);
+    // Idle staff are drawn where the clock put them, not where the last render did.
+    const plan = liveRef.current.length === agents.length ? liveRef.current : scenes;
 
     // Everything with a y coordinate, drawn back to front.
     type Entity = { y: number; paint: () => void };
     const entities: Entity[] = [];
 
+    interface Row {
+      index: number;
+      agent: OfficeAgentView;
+      scene: AgentScene;
+      palette: Palette;
+      runner: Runner;
+      feetY: number;
+      lift: number;
+      desk?: DeskSlot;
+    }
+
+    const rows: Row[] = [];
     agents.forEach((agent, index) => {
-      const scene = scenes[index];
+      const scene = plan[index];
       if (!scene) return;
-      const desk = scene.deskIndex >= 0 ? desks[scene.deskIndex] : undefined;
-      const palette = paletteFor(agent.name, index);
-      if (desk) {
+      const start = tileCenter(scene.tile.x, scene.tile.y);
+      const runner = staffRef.current.get(agent.id) ?? createRunner(start.x, start.y, scene.facing);
+      rows.push({
+        index,
+        agent,
+        scene,
+        palette: paletteFor(agent.name, index),
+        runner,
+        lift: scene.needsBoss && index % 2 === 1 ? 13 : 0,
+        feetY: scene.zone === 'desk' ? runner.y + 6 : runner.y,
+        desk: scene.deskIndex >= 0 ? desks[scene.deskIndex] : undefined,
+      });
+    });
+
+    // Bubbles for the whole frame are placed together: two people resting side by
+    // side must not cover each other's line, and none may hang off the map. An
+    // agent walking to the next rest spot has nothing over its head until it sits.
+    const talking = rows.filter(row => row.scene.bubble && !(row.scene.rest && row.runner.moving));
+    let bubbles = new Map<string, BubblePlacement>();
+    if (talking.length > 0) {
+      ctx.save();
+      ctx.font = BUBBLE_FONT;
+      const widthOf = (text: string) => ctx.measureText(text).width;
+      ctx.restore();
+      const placements = layoutBubbles(
+        talking.map(row => ({
+          id: row.agent.id,
+          x: row.runner.x,
+          bottomY: row.feetY - BUBBLE_LIFT - row.lift,
+          text: row.scene.bubble!,
+        })),
+        { widthOf, mapWidth: MAP_W, mapHeight: MAP_H },
+      );
+      bubbles = new Map(placements.map(placement => [placement.id, placement]));
+    }
+
+    for (const row of rows) {
+      const { runner, scene, agent } = row;
+      if (row.desk) {
+        const desk = row.desk;
         entities.push({
           y: desk.y * TILE + TILE * 2 - 1,
-          paint: () => drawDesk(ctx, desk, agent.name, agent.role, palette, selectedId === agent.id),
+          paint: () => drawDesk(ctx, desk, agent.name, agent.role, row.palette, selectedId === agent.id),
         });
       }
-      const runner = staffRef.current.get(agent.id) ?? createRunner(tileCenter(scene.tile.x, scene.tile.y).x, tileCenter(scene.tile.x, scene.tile.y).y, scene.facing);
-      const lift = scene.needsBoss && index % 2 === 1 ? 13 : 0;
-      const feetY = scene.zone === 'desk' ? runner.y + 6 : runner.y;
       entities.push({
         y: runner.y,
         paint: () => {
-          drawCharacter(ctx, runner.x, feetY, {
-            palette,
+          drawCharacter(ctx, runner.x, row.feetY, {
+            palette: row.palette,
             facing: runner.facing,
-            frame: runner.moving ? runner.frame : tick + index,
+            frame: runner.moving ? runner.frame : tick + row.index,
             pose: scene.pose,
             moving: runner.moving,
             alpha: scene.alpha,
           });
-          if (scene.needsBoss) drawNeedsBoss(ctx, runner.x + 19, feetY - 30 - lift, tick);
-          if (scene.bubble) {
-            drawBubble(ctx, runner.x, feetY - 38 - lift, scene.bubble, scene.bubbleTone);
-            drawNameTag(ctx, runner.x, feetY - 25 - lift, agent.name);
-          } else {
-            drawNameTag(ctx, runner.x, feetY - 25, agent.name);
-          }
+          if (scene.needsBoss) drawNeedsBoss(ctx, runner.x + 19, row.feetY - 30 - row.lift, tick);
+          const bubble = bubbles.get(agent.id);
+          if (bubble && scene.bubble) drawBubbleAt(ctx, bubble, scene.bubble, scene.bubbleTone);
+          drawNameTag(ctx, runner.x, row.feetY - 25 - row.lift, agent.name);
           if (selectedId === agent.id) {
             ctx.save();
             ctx.strokeStyle = 'rgba(125,211,252,0.95)';
@@ -278,7 +336,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
           }
         },
       });
-    });
+    }
 
     const moveMarker = tapRef.current;
     if (moveMarker) {
@@ -310,6 +368,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
     let raf = 0;
     let last = performance.now();
     let alive = true;
+    let plannedAt = Number.NEGATIVE_INFINITY;
 
     const frame = (now: number) => {
       if (!alive) return;
@@ -333,14 +392,25 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
       }
       if (player.moving) player.frame = Math.floor(now / 110) % 4;
 
-      // The staff: walk to wherever the new status puts them.
-      for (const scene of sceneRef.current) {
+      // The clock-driven plan: idle staff drift between rest spots and say something
+      // now and then. Four times a second is enough to start a new walk or raise a
+      // bubble, and it costs nothing compared with the frame that follows.
+      if (now - plannedAt >= PLAN_REFRESH_MS || liveRef.current.length !== agents.length) {
+        plannedAt = now;
+        liveRef.current = planScenes(agents, overview, { now });
+      }
+      const plan = liveRef.current.length > 0 ? liveRef.current : sceneRef.current;
+
+      // The staff: walk to wherever the new status puts them. An agent called back
+      // from a break crosses the office at a trot — the work does not wait.
+      for (const scene of plan) {
         const existing = staffRef.current.get(scene.agentId);
         const start = tileCenter(scene.tile.x, scene.tile.y);
         const runner = existing ?? createRunner(start.x, start.y, scene.facing);
         if (!existing) staffRef.current.set(scene.agentId, runner);
         const goal = key(scene.tile);
         if (runner.goal !== goal) {
+          const wasResting = runner.zone !== null && REST_ZONES.has(runner.zone);
           runner.goal = goal;
           const from = tileAtPixel(runner.x, runner.y);
           const path = findPath(grid, from, scene.tile);
@@ -349,16 +419,21 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
             runner.x = start.x;
             runner.y = start.y;
           }
+          runner.hurry = wasResting && !REST_ZONES.has(scene.zone);
         }
-        stepAlong(grid, runner, STAFF_SPEED * delta);
+        runner.zone = scene.zone;
+        stepAlong(grid, runner, (runner.hurry ? STAFF_SPEED * HURRY_FACTOR : STAFF_SPEED) * delta);
         if (runner.moving) runner.frame = Math.floor(now / 120) % 4;
-        else runner.facing = scene.facing;
+        else {
+          runner.facing = scene.facing;
+          runner.hurry = false;
+        }
       }
 
       // A chat prompt for whoever is within arm's reach.
       let closestAgent: OfficeAgentView | null = null;
       let closestDistance = Number.POSITIVE_INFINITY;
-      for (const scene of sceneRef.current) {
+      for (const scene of plan) {
         const runner = staffRef.current.get(scene.agentId);
         if (!runner) continue;
         const distance = Math.hypot(runner.x - player.x, runner.y - player.y);
@@ -391,7 +466,7 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
       window.cancelAnimationFrame(raf);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [agents, draw, grid]);
+  }, [agents, draw, grid, overview]);
 
   // ── keyboard ─────────────────────────────────────────────────────────────
   useEffect(() => {

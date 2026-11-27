@@ -206,14 +206,15 @@ describe('what each agent is doing', () => {
     expect(scene?.bubble).toContain('T-02');
   });
 
-  it('rests paused staff in the lobby and idle staff by the pantry', () => {
+  it('rests paused staff in the lobby and sends idle staff to a rest spot', () => {
     const agents = [agent('ag_1', 'Gemini', 'paused'), agent('ag_2', 'GPT', 'idle')];
-    const scenes = planScenes(agents, office(agents));
+    const scenes = planScenes(agents, office(agents), { now });
     expect(scenes[0]?.zone).toBe('lounge');
     expect(scenes[0]?.pose).toBe('sit');
-    expect(scenes[1]?.zone).toBe('pantry');
-    // Korean is the default language, so the bubble over an idle agent is 대기.
-    expect(scenes[1]?.bubble).toBe('대기');
+    expect(scenes[0]?.rest).toBe(false);
+    // Idle staff rest and chat; where exactly is the clock's business (idleChat.test).
+    expect(scenes[1]?.rest).toBe(true);
+    expect(['pantry', 'lounge']).toContain(scenes[1]?.zone);
   });
 
   it('draws offline staff faded at their desk with a Zzz', () => {
@@ -230,9 +231,11 @@ describe('what each agent is doing', () => {
       agent('ag_1', '망고', 'idle'), agent('ag_2', '피클', 'idle'), agent('ag_3', 'ChatGPT', 'idle'),
       agent('ag_4', 'Claude', 'idle'), agent('ag_5', 'Aside', 'idle'), agent('ag_6', 'Gemini', 'idle'),
     ];
-    const scenes = planScenes(agents, office(agents));
-    const keys = scenes.map(scene => `${scene.tile.x},${scene.tile.y}`);
-    expect(new Set(keys).size).toBe(keys.length);
+    for (let offset = 0; offset < 40_000; offset += 2_000) {
+      const scenes = planScenes(agents, office(agents), { now: now + offset });
+      const keys = scenes.map(scene => `${scene.tile.x},${scene.tile.y}`);
+      expect(new Set(keys).size).toBe(keys.length);
+    }
   });
 
   it('hands the overflow staff no desk but still a place to stand', () => {
