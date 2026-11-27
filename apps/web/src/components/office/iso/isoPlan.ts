@@ -41,11 +41,11 @@ export interface IsoZone {
 export const ISO_ZONES: IsoZone[] = [
   {
     id: 'analysis', rect: { x: 1, y: 1, w: 7, h: 6 }, accent: '#A78BFA',
-    label: { x: 3.4, y: 1.6 }, door: { x: 8, y: 4.2 }, hub: { x: 8.9, y: 4.6 }, wall: 28,
+    label: { x: 3.4, y: 1.6 }, door: { x: 8, y: 5.6 }, hub: { x: 8.9, y: 5.6 }, wall: 28,
   },
   {
     id: 'lounge', rect: { x: 8, y: 1, w: 5, h: 4 }, accent: '#94A3B8',
-    label: { x: 10.5, y: 1.5 }, door: { x: 10.5, y: 5 }, hub: { x: 10.5, y: 5.9 }, wall: 13,
+    label: { x: 10.5, y: 1.5 }, door: { x: 9.1, y: 5 }, hub: { x: 9.1, y: 5.9 }, wall: 13,
   },
   {
     id: 'ceo', rect: { x: 13.4, y: 1, w: 7.6, h: 5 }, accent: '#FBBF24',
@@ -57,7 +57,7 @@ export const ISO_ZONES: IsoZone[] = [
   },
   {
     id: 'dev', rect: { x: 13.8, y: 6.4, w: 7.2, h: 6.6 }, accent: '#34D399',
-    label: { x: 17.2, y: 6.9 }, door: { x: 13.8, y: 10.4 }, hub: { x: 13, y: 10.4 }, wall: 28,
+    label: { x: 17.2, y: 6.9 }, door: { x: 13.8, y: 8.8 }, hub: { x: 13, y: 8.8 }, wall: 28,
   },
   {
     id: 'meeting', rect: { x: 1, y: 7.2, w: 5.4, h: 7.6 }, accent: '#60A5FA',
@@ -68,6 +68,38 @@ export const ISO_ZONES: IsoZone[] = [
     label: { x: 9.6, y: 12.1 }, door: { x: 9.7, y: 11.6 }, hub: { x: 9.7, y: 10.9 }, wall: 22,
   },
 ];
+
+/** Which of a room's four edges its door is cut into. */
+export type IsoDoorEdge = 'x-' | 'x+' | 'y-' | 'y+';
+
+export interface IsoDoorway {
+  edge: IsoDoorEdge;
+  /** Where the opening sits along that edge, measured from the edge's first corner. */
+  at: number;
+  /** Half the opening, in tiles: the wall is cut this wide. */
+  half: number;
+}
+
+/** How wide a door is. Wide enough to walk through at a shoulder's width. */
+export const ISO_DOOR_HALF = 0.62;
+
+/**
+ * The door of a room, as an edge and a place along it. The plan stores a point;
+ * this is the same fact in the form the wall painter and the walker both need,
+ * so the gap in the glass and the gap in the collision cannot drift apart.
+ */
+export function zoneDoorway(zone: IsoZone): IsoDoorway {
+  const { door, rect } = zone;
+  const edges: Array<{ edge: IsoDoorEdge; distance: number; at: number; span: number }> = [
+    { edge: 'x-', distance: Math.abs(door.x - rect.x), at: door.y - rect.y, span: rect.h },
+    { edge: 'x+', distance: Math.abs(door.x - (rect.x + rect.w)), at: door.y - rect.y, span: rect.h },
+    { edge: 'y-', distance: Math.abs(door.y - rect.y), at: door.x - rect.x, span: rect.w },
+    { edge: 'y+', distance: Math.abs(door.y - (rect.y + rect.h)), at: door.x - rect.x, span: rect.w },
+  ];
+  const nearest = edges.reduce((best, row) => (row.distance < best.distance ? row : best));
+  const at = Math.max(ISO_DOOR_HALF, Math.min(nearest.span - ISO_DOOR_HALF, nearest.at));
+  return { edge: nearest.edge, at, half: ISO_DOOR_HALF };
+}
 
 export function zoneById(id: IsoZoneId): IsoZone {
   const zone = ISO_ZONES.find(row => row.id === id);
@@ -144,7 +176,9 @@ export const ALL_DESKS: IsoDesk[] = [CONTROL_DESK, OWNER_DESK, ...DEV_DESKS, ...
 /** Agents waiting on the boss stand in the CEO office, not at their own desk. */
 export const CEO_WAIT_SPOTS: IsoPoint[] = [
   { x: 15.4, y: 3.4 }, { x: 18.6, y: 3.4 }, { x: 17.0, y: 4.5 },
-  { x: 14.8, y: 4.4 }, { x: 19.6, y: 4.4 }, { x: 17.0, y: 5.4 },
+  // Clear of the boss's own starting spot (14.35, 4.35): an agent waiting for a
+  // decision should stand beside the boss, not inside it.
+  { x: 14.3, y: 2.4 }, { x: 19.6, y: 4.4 }, { x: 17.0, y: 5.4 },
 ];
 
 /** Nobody's seat: staff that could not get a desk work from the plaza board. */
@@ -268,11 +302,15 @@ function podProps(): IsoProp[] {
 }
 
 export const ISO_PROPS: IsoProp[] = [
+  // 책상 — the eight desks, each with its monitor and keyboard. They are the
+  // furniture a room is read by, so they are part of the plan, not decoration.
+  ...deskProps(),
+
   // 분석실 — the long board on the far wall, a cabinet, a shelf, a plant.
   { id: 'analysis-board', kind: 'board', zone: 'analysis', rect: { x: 1.4, y: 1.04, w: 2.6, h: 0.1 }, height: 20, accent: '#A78BFA' },
   { id: 'analysis-shelf', kind: 'shelf', zone: 'analysis', rect: { x: 5.7, y: 1.15, w: 1.6, h: 0.45 }, height: 13 },
   { id: 'analysis-cabinet', kind: 'cabinet', zone: 'analysis', rect: { x: 1.3, y: 5.9, w: 1.2, h: 0.5 }, height: 12 },
-  { id: 'analysis-plant', kind: 'plant', zone: 'analysis', rect: { x: 7.35, y: 6.2, w: 0.5, h: 0.5 }, height: 16 },
+  { id: 'analysis-plant', kind: 'plant', zone: 'analysis', rect: { x: 7.35, y: 1.35, w: 0.5, h: 0.5 }, height: 16 },
   { id: 'analysis-rug', kind: 'rug', zone: 'analysis', rect: { x: 1.85, y: 1.95, w: 5.0, h: 3.3 }, height: 0, accent: '#A78BFA' },
 
   // 개발실 — board, server rack, shelf, plant.
@@ -288,10 +326,10 @@ export const ISO_PROPS: IsoProp[] = [
   { id: 'control-holo-3', kind: 'holoScreen', zone: 'control', rect: { x: 11.6, y: 5.5, w: 0.95, h: 0.08 }, height: 26, accent: '#22D3EE' },
   { id: 'control-ring', kind: 'mat', zone: 'control', rect: { x: 9.8, y: 6.0, w: 2.0, h: 1.2 }, height: 0, accent: '#22D3EE' },
   { id: 'control-chair', kind: 'chair', zone: 'control', rect: { x: 10.55, y: 7.35, w: 0.5, h: 0.4 }, height: 5 },
-  { id: 'control-plant-a', kind: 'plant', zone: 'control', rect: { x: 12.9, y: 9.4, w: 0.5, h: 0.5 }, height: 16 },
+  { id: 'control-plant-a', kind: 'plant', zone: 'control', rect: { x: 12.7, y: 6.0, w: 0.5, h: 0.5 }, height: 16 },
   { id: 'control-plant-b', kind: 'plant', zone: 'control', rect: { x: 8.2, y: 9.7, w: 0.5, h: 0.5 }, height: 15 },
 
-  // 대표실 — rug, the boss's desk is in ALL_DESKS, board, chairs, lamp, plant.
+  // 대표실 — rug, the boss's own desk (see ALL_DESKS), board, chairs, lamp, plant.
   { id: 'ceo-rug', kind: 'rug', zone: 'ceo', rect: { x: 15.2, y: 2.2, w: 4.6, h: 2.8 }, height: 0, accent: '#FBBF24' },
   { id: 'ceo-board', kind: 'board', zone: 'ceo', rect: { x: 15.0, y: 1.05, w: 2.4, h: 0.1 }, height: 22, accent: '#FBBF24' },
   { id: 'ceo-chair-a', kind: 'chair', zone: 'ceo', rect: { x: 16.2, y: 3.6, w: 0.5, h: 0.4 }, height: 5 },
@@ -302,10 +340,12 @@ export const ISO_PROPS: IsoProp[] = [
   // 회의실 구역 — four pods, each with its table and a screen on the far edge.
   ...podProps(),
 
-  // 자료실 — three shelves, a reading table, the vault.
-  { id: 'archive-shelf-1', kind: 'shelf', zone: 'archive', rect: { x: 7.4, y: 12.1, w: 2.9, h: 0.4 }, height: 14 },
-  { id: 'archive-shelf-2', kind: 'shelf', zone: 'archive', rect: { x: 7.4, y: 12.8, w: 2.9, h: 0.4 }, height: 14 },
-  { id: 'archive-shelf-3', kind: 'shelf', zone: 'archive', rect: { x: 7.4, y: 13.5, w: 2.9, h: 0.4 }, height: 14 },
+  // 자료실 — three shelves, a reading table, the vault. The shelves stop short of
+  // the door so there is an aisle to walk down: a room you can enter but not
+  // stand in is a cupboard.
+  { id: 'archive-shelf-1', kind: 'shelf', zone: 'archive', rect: { x: 7.4, y: 12.1, w: 1.7, h: 0.4 }, height: 14 },
+  { id: 'archive-shelf-2', kind: 'shelf', zone: 'archive', rect: { x: 7.4, y: 12.8, w: 1.7, h: 0.4 }, height: 14 },
+  { id: 'archive-shelf-3', kind: 'shelf', zone: 'archive', rect: { x: 7.4, y: 13.5, w: 1.7, h: 0.4 }, height: 14 },
   { id: 'archive-table', kind: 'table', zone: 'archive', rect: { x: 10.6, y: 12.15, w: 1.3, h: 0.65 }, height: 9 },
   { id: 'archive-vault', kind: 'vault', zone: 'archive', rect: { x: 10.6, y: 13.5, w: 1.2, h: 0.9 }, height: 19, accent: '#F472B6' },
 
@@ -314,14 +354,14 @@ export const ISO_PROPS: IsoProp[] = [
   { id: 'lounge-sofa-b', kind: 'sofa', zone: 'lounge', rect: { x: 8.35, y: 3.45, w: 1.6, h: 0.55 }, height: 7 },
   { id: 'lounge-table', kind: 'table', zone: 'lounge', rect: { x: 10.3, y: 2.35, w: 0.9, h: 0.6 }, height: 6 },
   { id: 'lounge-counter', kind: 'counter', zone: 'lounge', rect: { x: 11.65, y: 1.15, w: 0.85, h: 1.0 }, height: 11 },
-  { id: 'lounge-plant', kind: 'plant', zone: 'lounge', rect: { x: 12.4, y: 3.9, w: 0.45, h: 0.45 }, height: 14 },
+  { id: 'lounge-plant', kind: 'plant', zone: 'lounge', rect: { x: 11.5, y: 4.3, w: 0.45, h: 0.45 }, height: 14 },
 
   // 광장 — the hologram in the corridor, benches and plants.
   { id: 'plaza-pillar', kind: 'holoPillar', zone: 'plaza', rect: { x: 10.4, y: 10.6, w: 0.5, h: 0.5 }, height: 32, accent: '#22D3EE' },
   { id: 'plaza-plant-a', kind: 'plant', zone: 'plaza', rect: { x: 12.9, y: 5.9, w: 0.45, h: 0.45 }, height: 15 },
   { id: 'plaza-plant-b', kind: 'plant', zone: 'plaza', rect: { x: 6.9, y: 6.6, w: 0.45, h: 0.45 }, height: 15 },
   { id: 'plaza-plant-c', kind: 'plant', zone: 'plaza', rect: { x: 12.9, y: 11.0, w: 0.45, h: 0.45 }, height: 15 },
-  { id: 'plaza-bench-a', kind: 'sofa', zone: 'plaza', rect: { x: 6.9, y: 9.4, w: 0.5, h: 1.1 }, height: 6 },
+  { id: 'plaza-bench-a', kind: 'sofa', zone: 'plaza', rect: { x: 6.9, y: 8.6, w: 0.5, h: 1.1 }, height: 6 },
   { id: 'plaza-mat', kind: 'mat', zone: 'plaza', rect: { x: 13.0, y: 11.9, w: 0.7, h: 1.1 }, height: 0, accent: '#22D3EE' },
 ];
 

@@ -21,6 +21,7 @@ import {
   podAtGrid,
   zoneAtGrid,
   zoneCorners,
+  zoneDoorway,
 } from './isoPlan.js';
 
 describe('the isometric floor plan', () => {
@@ -134,6 +135,22 @@ describe('the isometric floor plan', () => {
       expect(box.minY).toBeGreaterThanOrEqual(bounds.minY);
       // The tallest wall (32px) has to fit above the floor's back corner.
       expect(bounds.minY).toBeLessThan(box.minY - 30);
+    }
+  });
+
+  it('cuts every door into the wall it actually sits on', () => {
+    for (const zone of ISO_ZONES) {
+      const { edge, at, half } = zoneDoorway(zone);
+      const point = edge === 'x-'
+        ? { x: zone.rect.x, y: zone.rect.y + at }
+        : edge === 'x+'
+          ? { x: zone.rect.x + zone.rect.w, y: zone.rect.y + at }
+          : edge === 'y-'
+            ? { x: zone.rect.x + at, y: zone.rect.y }
+            : { x: zone.rect.x + at, y: zone.rect.y + zone.rect.h };
+      expect(point.x, `${zone.id} door x`).toBeCloseTo(zone.door.x, 6);
+      expect(point.y, `${zone.id} door y`).toBeCloseTo(zone.door.y, 6);
+      expect(half).toBeGreaterThan(0);
     }
   });
 
