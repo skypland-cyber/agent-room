@@ -234,6 +234,8 @@ export const exportBackup = (includeBoards = false) =>
 
 export interface BackupValidation {
   ok: boolean;
+  /** Shape/version check only, without the checksum verdict. */
+  shapeOk: boolean;
   issues: string[];
   warnings: string[];
   summary: {
