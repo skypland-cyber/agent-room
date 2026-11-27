@@ -316,9 +316,14 @@ describe('the line over a working head', () => {
     expect(head.length).toBeLessThanOrEqual('T-16 · '.length + BUBBLE_TITLE_MAX + 1);
   });
 
-  it('warns when the lease is about to run out', () => {
+  it('warns when the lease is about to run out, in the same two lines', () => {
     const soon = working({ taskState: 'in_progress', taskProgress: 50, leaseEndsAt: now + 120_000 });
-    expect(taskBubble(soon, 'working', now)).toContain('곧 만료 2분');
+    const line = taskBubble(soon, 'working', now);
+    // The warning replaces the percentage on the second line rather than adding
+    // a third: the gauge under the bubble carries the share.
+    expect(line.split('\n')).toHaveLength(2);
+    expect(line).toContain('곧 만료 2분');
+    expect(line).toContain('진행 중');
     expect(taskBubbleTone(soon, 'working', now)).toBe('warn');
     // A lease with hours left is not the boss's problem yet.
     const later = working({ taskState: 'in_progress', taskProgress: 50, leaseEndsAt: now + 3_600_000 });

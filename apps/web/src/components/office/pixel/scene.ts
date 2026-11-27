@@ -91,7 +91,11 @@ export function taskBubble(
   const lease = now > 0 && remaining !== undefined && remaining > 0 && remaining <= TASK_LEASE_SOON_MS
     ? t('pixel.bubble.leaseSoon', { minutes: Math.max(1, Math.ceil(remaining / 60_000)) })
     : '';
-  return [head, `${state} · ${progress}`, ...(lease ? [lease] : [])].join('\n');
+  // Two lines, always. When the lease is about to lapse the warning takes the
+  // place of the percentage — the gauge under the bubble still shows the share,
+  // and a third line would make the bubble taller than the head it hangs over.
+  const detail = lease ? `${state} · ${lease}` : `${state} · ${progress}`;
+  return [head, detail].join('\n');
 }
 
 /** The tone a task bubble is drawn in: a lease about to lapse outranks a calm status. */
