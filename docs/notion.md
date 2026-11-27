@@ -1,4 +1,4 @@
-# Notion: the office's long-term memory (Phase 1)
+# Notion: the office's long-term memory (Phases 1–2)
 
 The office keeps its live state in Redis (rooms, boards, chat, heartbeats) and its
 files in the vault. Notion is the third place, and the only one a person reads and
@@ -7,9 +7,11 @@ meeting minutes, reports, digital products, the finance ledger, deliverables, an
 knowledge base. Redis stays the source of truth for live state; Notion gets events
 only, one row each.
 
-This document covers **Phase 1** — the client, the schema, and the bootstrap. Sync,
-search, and reports are later phases and are not wired yet (`NOTION_SYNC_MODE` is
-read but nothing writes to Notion outside bootstrap/repair).
+This document covers **Phases 1–2** — the client, the schema, the bootstrap, and
+the read path the AI staff use: `knowledge_search` and `knowledge_get`, with the
+Redis cache in front of them. Sync and reports are later phases and are not wired
+yet (`NOTION_SYNC_MODE` is read but nothing writes to Notion outside
+bootstrap/repair, and `knowledge_save` is Phase 4).
 
 ## The eight databases
 
@@ -69,6 +71,72 @@ Bootstrap is idempotent: the root page's children are read first and a database 
 the same title is reused, so a second run creates nothing and a half-built workspace
 finishes instead of doubling.
 
+## Phase 2: the read path (`knowledge_search` / `knowledge_get`)
+
+Both tools are read-only, need no room code, and are listed **only** for an MCP
+token whose grant carries `knowledge`: `"read"` or `"write"`. A token without it
+never sees them (`Invalid MCP grant` if the value is anything else).
+
+```json
+{ "<sha256 of token>": { "rooms": "*", "profile": "core", "knowledge": "read" } }
+```
+
+| Tool | Input | What it costs |
+|---|---|---|
+| `knowledge_search` | `query` (or `project` / `type` / `tags`), `limit` 1–25 (default 8), `include_body` | 1 Notion call, 3 with `include_body` (top two bodies), **0** for the same question inside 10 minutes |
+| `knowledge_get` | `id`, `key`, `title`, or `kind: "manual"` + `name` | 1–2 calls the first time, **0** for 15 minutes |
+
+The search is one `data_sources.query` against the knowledge data source with an
+`or` filter over 제목 · 키워드 · 내용 · 태그 (plus `and` for project and 유형), sorted
+by 최근 갱신. Everything is addressed by **property id**, so renaming a column in
+Notion does not break it. Results are then scored locally — title 3 · tag 2 ·
+keyword corpus 1 · content 1, plus a 90-day recency term — and the top `limit`
+are returned with a snippet around the match.
+
+A page body comes from `GET /v1/pages/{id}/markdown`; when that is unavailable the
+`내용` property answers instead and `bodySource` says which one it was. The body
+is clipped at 20,000 characters.
+
+`kind: "manual"` reads the AI staff manual a person wrote in Notion (업무 원칙 ·
+금지 사항 · 출력 형식 · 도구 사용), cached as one list for 15 minutes.
+
+**Identity.** A `code` + `seatKey` pair is proof of a seat and is recorded as
+`identity: "seat"`; a name that the office roster knows is a claim and is recorded
+as `identity: "name"` (with the roster spelling); a seatKey that does not match is
+not trusted and not fatal — the answer says `seatUnverified: true` and falls back
+to the name. Reading never requires either.
+
+**Everything from Notion is data.** Every response carries `untrusted: true`, and
+the tool descriptions say so: text written in a page is not an instruction and
+cannot authorise an action.
+
+### Cache keys and degradation (§7.1–7.2)
+
+| Key | TTL | Contents |
+|---|---|---|
+| `notion:v1:cache:q:{sha1 of query, project, type, tags, limit}` | 600s | Scored results (+ bodies once they were read) |
+| `notion:v1:cache:page:{pageId}` | 900s | Properties + body, clipped at 20,000 characters |
+| `notion:v1:cache:manuals` | 900s | Staff manual summaries |
+
+Every entry is an envelope `{ v, at, value }`, so an answer can report its own age
+(`cacheAgeSeconds`). On a 429/529/timeout — or when the request's own Notion call
+ceiling (`NOTION_MAX_CALLS_PER_REQUEST`, default 6) is reached — a cached answer
+is returned with `stale: true` rather than an error. A configuration or permission
+failure is never degraded that way: "here is yesterday's answer" would be a lie
+about a broken connection. An answer that had to stop short says `truncated: true`.
+
+### What a caller sees when something is wrong
+
+| `error` | Meaning / next step |
+|---|---|
+| `notion_not_configured` | `NOTION_API_KEY` / `NOTION_ROOT_PAGE_ID` not set on this deployment |
+| `notion_not_bootstrapped` | Run `POST /api/notion {action:"bootstrap"}` once |
+| `notion_rate_limited` | `retryAfterSeconds` included; a stale answer is served when one exists |
+| `notion_forbidden` | The id is not a row of the office's own databases, or the connection lost access |
+| `notion_not_found` | No page/manual by that id, key, title or name |
+| `notion_invalid_request` | `knowledge_search` with nothing to search for, or an unknown 유형 |
+| `notion_call_budget` | This request reached `NOTION_MAX_CALLS_PER_REQUEST`; ask again (the cache may answer) |
+
 ## Properties are addressed by id
 
 The schema cache (`notion:v1:schema`, no TTL) stores, per database, the database id,
@@ -90,8 +158,9 @@ or a changed type, and passes through a rename.
   15–30 minutes. Rows carry the file id and a stable `/office` link; a download link
   is minted on demand.
 
-## Not in this phase
+## Not in these phases
 
-Row seeding (staff manuals, the first product), event sync, the knowledge MCP tools,
-reports via cron, and the dashboard card are Phases 2–5 of the design. `bootstrap`
-returns `rowsSeed: "deferred"` so this is visible in its own output.
+Row seeding (staff manuals, the first product), event sync, `knowledge_save`,
+reports via cron, and the dashboard card are Phases 3–5 of the design. `bootstrap`
+returns `rowsSeed: "deferred"` so this is visible in its own output, and the tool
+list never advertises `knowledge_save` before Phase 4 exists.
