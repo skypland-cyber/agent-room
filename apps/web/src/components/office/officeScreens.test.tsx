@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { OfficeAgentView, OfficeOverview } from '@agent-room/shared';
 import { PixelOffice } from './pixel/PixelOffice.js';
+import { ControlCenter } from './iso/ControlCenter.js';
 import { OfficeAgentPanel } from './pixel/OfficeAgentPanel.js';
 import { OfficeStaffPanel } from './OfficeStaffPanel.js';
 import { OfficeProjectsPanel } from './OfficeProjectsPanel.js';
@@ -81,6 +82,40 @@ const overview = {
 } satisfies OfficeOverview;
 
 describe('office screens render', () => {
+  it('renders the isometric control centre with its rooms and HUD', () => {
+    const html = renderToStaticMarkup(
+      <ControlCenter
+        overview={overview}
+        onSelect={() => undefined}
+        onAddStaff={() => undefined}
+        onChanged={() => undefined}
+        onOpenTab={() => undefined}
+      />,
+    );
+    // The floor itself.
+    expect(html).toContain('<canvas');
+    expect(html).toContain('AI 관제센터');
+    expect(html).toContain('5명 근무'.slice(0, 3));
+    // The HUD: today, alerts, staff with their limits, the rooms.
+    expect(html).toContain('오늘의 업무');
+    expect(html).toContain('승인 대기 1건');
+    expect(html).toContain('Qwen');
+    expect(html).toContain('오늘 2/20');
+    expect(html).toContain('QWE-RTY-234');
+    expect(html).toContain('D-2');
+    // No blank screen when there is nothing yet.
+    const emptyHtml = renderToStaticMarkup(
+      <ControlCenter
+        overview={{ ...overview, agents: [], counts: { ...overview.counts, agents: 0, onlineAgents: 0 } }}
+        onSelect={() => undefined}
+        onAddStaff={() => undefined}
+        onChanged={() => undefined}
+        onOpenTab={() => undefined}
+      />,
+    );
+    expect(emptyHtml).toContain('오피스가 비어 있습니다');
+  });
+
   it('renders the pixel floor with a canvas and the live staff count', () => {
     const html = renderToStaticMarkup(
       <PixelOffice overview={overview} onSelect={() => undefined} onAddStaff={() => undefined} onChanged={() => undefined} />,

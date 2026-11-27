@@ -9,18 +9,18 @@
 // sign-in card and the setup instructions are the three places a first-time
 // visitor meets the office, so none of them may fall back to English.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import type { OfficeOverview, OfficeTemplate } from '@agent-room/shared';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { LanguageToggle } from '../components/LanguageToggle.js';
-import { PixelOffice } from '../components/office/pixel/PixelOffice.js';
+import { ControlCenter, type ControlCenterTab } from '../components/office/iso/ControlCenter.js';
 import { OfficeStaffPanel } from '../components/office/OfficeStaffPanel.js';
 import { OfficeProjectsPanel } from '../components/office/OfficeProjectsPanel.js';
 import { OfficeWorkPanel } from '../components/office/OfficeWorkPanel.js';
 import { OfficeArchivePanel } from '../components/office/OfficeArchivePanel.js';
 import { OfficeAutomationPanel } from '../components/office/OfficeAutomationPanel.js';
 import { OfficeSettingsPanel } from '../components/office/OfficeSettingsPanel.js';
-import { OfficeTodayCard, UsageGauge } from '../components/office/OfficeTodayCard.js';
+import { UsageGauge } from '../components/office/OfficeTodayCard.js';
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, SectionTitle, formatDate, timeAgo, useVisibleInterval } from '../components/office/ui.js';
 import { listTemplates, officeLogin, officeLogout, officeOverview, officeStatus, type OfficeStatus } from '../lib/officeApi.js';
 import { errorText, setupStepsText, warningText } from '../i18n/errors.js';
@@ -57,6 +57,7 @@ const TABS: Array<{ key: TabKey; labelKey: MessageKey; badge?: (overview: Office
 
 export function Office() {
   const { t } = useI18n();
+  const navigate = useNavigate();
   const [status, setStatus] = useState<OfficeStatus | null>(null);
   const [overview, setOverview] = useState<OfficeOverview | null>(null);
   const [tab, setTab] = useState<TabKey>('floor');
@@ -306,7 +307,8 @@ export function Office() {
             selectedAgent={selectedAgent}
             onSelect={setSelectedAgent}
             onAddStaff={() => setTab('staff')}
-            onOpenWork={() => setTab('work')}
+            onOpenTab={setTab}
+            onOpenRoom={code => navigate(`/r/${code}`)}
             onChanged={onChanged}
           />
         ) : tab === 'work' ? (
@@ -332,12 +334,13 @@ export function Office() {
   );
 }
 
-function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onOpenWork, onChanged }: {
+function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onOpenTab, onOpenRoom, onChanged }: {
   overview: OfficeOverview;
   selectedAgent?: string;
   onSelect: (id: string | undefined) => void;
   onAddStaff: () => void;
-  onOpenWork: () => void;
+  onOpenTab: (tab: ControlCenterTab) => void;
+  onOpenRoom: (code: string) => void;
   onChanged: () => void | Promise<void>;
 }) {
   const { t } = useI18n();
@@ -351,7 +354,15 @@ function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onOpenWork, o
 
   return (
     <div className="grid gap-5">
-      <OfficeTodayCard overview={overview} onOpenWork={onOpenWork} />
+      <ControlCenter
+        overview={overview}
+        selectedId={selectedAgent}
+        onSelect={onSelect}
+        onAddStaff={onAddStaff}
+        onChanged={() => void onChanged()}
+        onOpenTab={onOpenTab}
+        onOpenRoom={onOpenRoom}
+      />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map(card => (
@@ -370,14 +381,6 @@ function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onOpenWork, o
           ))}
         </ul>
       ) : null}
-
-      <PixelOffice
-        overview={overview}
-        selectedId={selectedAgent}
-        onSelect={onSelect}
-        onAddStaff={onAddStaff}
-        onChanged={() => void onChanged()}
-      />
 
       <Card>
         <SectionTitle title={t('floor.latest.title')} hint={t('floor.latest.hint')} action={<Badge tone="info">{overview.counts.archivedMeetings}</Badge>} />
