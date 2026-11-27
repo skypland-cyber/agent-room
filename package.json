@@ -11,6 +11,9 @@
     "packages/*",
     "apps/*"
   ],
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "test": "npm -ws run test --if-present",
     "test:api": "vitest run --dir api",
@@ -28,6 +31,8 @@
     "@aws-sdk/client-s3": "^3.1040.0",
     "@aws-sdk/s3-request-presigner": "3.1040.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@vercel/blob": "^2.9.0"
+    "@notionhq/client": "^5.32.0",
+    "@vercel/blob": "^2.9.0",
+    "@vercel/functions": "^3.9.0"
   }
 }
