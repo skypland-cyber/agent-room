@@ -310,6 +310,77 @@ describe('templates', () => {
   });
 });
 
+describe('room lifecycle', () => {
+  // A room opened from the office side (templates.apply) keeps no host key in
+  // any client, so the normal host-only ending path cannot close it. These are
+  // the owner's controls for exactly that kind of junk room.
+  const seedRoom = async (code: string, topic: string) => {
+    const { createRoom } = await import('@agent-room/upstash-client');
+    const { createRemoteRoomClient } = await import('./_mcpRoomClient.js');
+    const client = createRemoteRoomClient(undefined);
+    await createRoom(client.store, { code, createdBy: 'Owner', topic, requireUnusedCode: true });
+    return client;
+  };
+
+  it('ends a hostless room and archives its minutes', async () => {
+    const cookie = await signIn();
+    const code = 'END-HST-234';
+    const client = await seedRoom(code, '망고가 놓아둔 빈 방');
+    await client.store.command(['RPUSH', `room-msgs:${code}`, JSON.stringify({
+      id: 1, name: 'Owner', role: 'host', color: 'blue', initials: 'OW', client: 'web', type: 'msg',
+      text: '[STATUS] 확인만 하고 떠남', time: Date.now(),
+    })]);
+
+    const ended = await call('rooms.end', { code }, cookie);
+    expect(ended.statusCode).toBe(200);
+    expect(ended.jsonBody.room).toMatchObject({ code, status: 'ended', messages: 1 });
+
+    const listed = await call('rooms.list', {}, cookie);
+    const row = listed.jsonBody.rooms.find((room: { code: string }) => room.code === code);
+    expect(row?.status).toBe('ended');
+
+    const archives = await call('archives.list', { query: '빈 방' }, cookie);
+    expect(archives.jsonBody.archives.some((archive: { roomCode: string }) => archive.roomCode === code)).toBe(true);
+  });
+
+  it('deletes a room: gone from the dashboard and from Redis, no archive', async () => {
+    const cookie = await signIn();
+    const code = 'DKX-JNK-567';
+    const client = await seedRoom(code, 'C3S-8A4-U73 방에서 내게 배정된 업무를 확인');
+    await client.store.command(['RPUSH', `room-msgs:${code}`, JSON.stringify({
+      id: 1, name: 'Codex', role: 'dev', color: 'red', initials: 'C', client: 'cc', type: 'msg',
+      text: '잘못 들어온 방', time: Date.now(),
+    })]);
+    await client.store.command(['SET', `task-board:${code}`, JSON.stringify({ code, version: 1, tasks: [] })]);
+
+    const deleted = await call('rooms.delete', { code }, cookie);
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.jsonBody).toMatchObject({ deleted: true, code, messages: 1 });
+
+    const listed = await call('rooms.list', {}, cookie);
+    expect(listed.jsonBody.rooms.some((room: { code: string }) => room.code === code)).toBe(false);
+    const overview = await call('overview', {}, cookie);
+    expect(overview.jsonBody.overview.rooms.some((room: { code: string }) => room.code === code)).toBe(false);
+
+    for (const key of [`room:${code}`, `room-msgs:${code}`, `task-board:${code}`]) {
+      expect(await client.store.command(['GET', key])).toBeNull();
+    }
+    // Deleting is not archiving: a junk room leaves no record to read later.
+    const archives = await call('archives.list', { query: '잘못 들어온' }, cookie);
+    expect(archives.jsonBody.archives).toHaveLength(0);
+
+    const audit = await call('audit.list', { filterAction: 'room.delete' }, cookie);
+    expect(audit.jsonBody.entries[0]).toMatchObject({ roomCode: code });
+  });
+
+  it('rejects a malformed code, an unknown room, and a caller without the cookie', async () => {
+    const cookie = await signIn();
+    expect((await call('rooms.delete', { code: 'nope' }, cookie)).statusCode).toBe(400);
+    expect((await call('rooms.end', { code: 'ZZZ-ZZZ-ZZZ' }, cookie)).statusCode).toBe(404);
+    expect((await call('rooms.delete', { code: 'ZZZ-ZZZ-ZZZ' })).statusCode).toBe(401);
+  });
+});
+
 describe('presence', () => {
   // The dashboard reads each staff member's presence from the roster name, but
   // the board and the heartbeat carry the room name — "Gemini (2)" after a

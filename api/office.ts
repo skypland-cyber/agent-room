@@ -71,6 +71,7 @@ const WRITE_ACTIONS = new Set([
   'projects.guideline.add', 'projects.guideline.update', 'projects.guideline.delete', 'projects.link',
   'tasks.pause', 'tasks.resume', 'tasks.abort', 'tasks.approve', 'tasks.reject', 'tasks.retry', 'tasks.qa', 'tasks.requestApproval',
   'archives.capture', 'archives.delete',
+  'rooms.end', 'rooms.delete',
   'templates.save', 'templates.delete', 'templates.apply',
   'settings.save',
   'backup.restore',
@@ -451,6 +452,48 @@ async function handleTasks(store: ReturnType<typeof officeStore>, action: string
   }
 }
 
+/**
+ * Room lifecycle for a room nobody can host any more.
+ *
+ * A room is normally ended by its host with the hostKey `room_create` returned.
+ * Rooms opened from the office side (`templates.apply`) or by an agent that
+ * misread its brief have no such key in any client — the server keeps only its
+ * hash — so neither `room_end` nor the room UI can close them. The office owner
+ * can: `rooms.end` closes the room and archives its minutes, `rooms.delete`
+ * ends it without an archive and drops the room's data so it leaves the
+ * dashboard instead of sitting there as an empty ended room.
+ */
+async function handleRooms(store: ReturnType<typeof officeStore>, action: string, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
+  if (action !== 'rooms.end' && action !== 'rooms.delete') {
+    throw new OfficeApiError(`Unknown rooms action ${action}.`, 400, 'bad_request');
+  }
+  const code = requireCode(body);
+  const room = await office.getRoom(store, code).catch(() => undefined);
+  if (!room) throw new OfficeApiError(`No room ${code} (rooms expire 30 days after creation).`, 404, 'room_not_found');
+  const messages = await office.listMessages(store, code, 0).catch(() => []);
+  const summary = {
+    code, topic: room.topic, createdBy: room.createdBy, status: room.status,
+    participants: room.participants.length, messages: messages.length,
+  };
+  if (action === 'rooms.end') {
+    const ended = room.status === 'active' ? await office.endRoom(store, code) : room;
+    // Best-effort, exactly as the room UI treats it: ending must not fail
+    // because the archive is unavailable.
+    await captureRoomArchive(store, code, OWNER).catch(() => undefined);
+    await audit(store, OWNER, 'room.end', { roomCode: code, detail: room.topic.slice(0, 120) });
+    send(res, 200, { room: { ...summary, status: ended.status, endedAt: ended.endedAt } });
+    return;
+  }
+  await office.unregisterBoardRoom(store, code);
+  await office.unregisterOfficeRoom(store, code);
+  await office.deleteRoomData(store, code);
+  await audit(store, OWNER, 'room.delete', {
+    roomCode: code,
+    detail: `${room.topic.slice(0, 100)} · ${messages.length} messages discarded`,
+  });
+  send(res, 200, { deleted: true, ...summary });
+}
+
 async function handleArchives(store: ReturnType<typeof officeStore>, action: string, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
   if (action === 'archives.list') {
     const query = str(body.query, 200);
@@ -720,6 +763,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
     if (action === 'rooms.list') { send(res, 200, { rooms: await roomSummaries(store) }); return; }
+    if (action === 'rooms.end' || action === 'rooms.delete') { await handleRooms(store, action, body, res); return; }
     if (action === 'audit.list') {
       // `body.action` is the router's opcode ("audit.list"); the log's action
       // filter is a separate field, or a `filter` object for convenience.

@@ -660,6 +660,20 @@ export async function getOfficeRoomRecord(client: UpstashClient, code: string): 
   return readJson<OfficeRoomRecord>(client, roomKey(code));
 }
 
+/**
+ * Forget a room the office listed: drop it from the registry and its record.
+ *
+ * The room's own key is a different one (`room:<code>`, see rooms.ts), so this
+ * only stops the dashboard listing the room; deleting the room itself is the
+ * caller's second step (deleteRoomData).
+ */
+export async function unregisterOfficeRoom(client: UpstashClient, code: string): Promise<void> {
+  await client.pipeline([
+    ['SREM', ROOMS, code],
+    ['DEL', roomKey(code)],
+  ]);
+}
+
 // ─── Audit log ────────────────────────────────────────────────────────────
 
 export async function appendAudit(
