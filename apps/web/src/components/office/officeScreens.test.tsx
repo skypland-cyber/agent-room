@@ -103,6 +103,12 @@ describe('office screens render', () => {
     expect(html).toContain('오늘 2/20');
     expect(html).toContain('QWE-RTY-234');
     expect(html).toContain('D-2');
+    // The boss's own avatar: a tag, the room it is standing in, and the pad that
+    // walks it on a phone.
+    expect(html).toContain('대표 · 대표실');
+    expect(html).toContain('대표 이동 패드');
+    expect(html).toContain('위로 걷기');
+    expect(html).toContain('WASD');
     // No blank screen when there is nothing yet.
     const emptyHtml = renderToStaticMarkup(
       <ControlCenter

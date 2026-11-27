@@ -12,7 +12,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OfficeAgentView, OfficeOverview } from '@agent-room/shared';
 import { gridRectCorners, gridToIso, fitView, sameView, screenToGrid, worldToScreen, type IsoPoint, type IsoView } from './iso.js';
-import { ISO_ZONES, MEETING_PODS, isoWorldBounds, podAtGrid, zoneAtGrid, type IsoZoneId } from './isoPlan.js';
+import { ISO_ZONES, MEETING_PODS, isoWorldBounds, podAtGrid, zoneAtGrid, type IsoFacing, type IsoZoneId } from './isoPlan.js';
+import {
+  CEO_GREET_RADIUS,
+  CEO_SPAWN,
+  ceoZoneAt,
+  directionVector,
+  facingFor,
+  nearestNeighbour,
+  stepCeo,
+  type CeoDirection,
+} from './isoWalk.js';
 import { isoAlerts, isoZoneFacts, planIso, podBindings, type IsoAgentScene } from './isoScene.js';
 import { paintFrame, paintStatic, statusColor } from './paintIso.js';
 import { OfficeAgentPanel } from '../pixel/OfficeAgentPanel.js';
@@ -56,8 +66,15 @@ const ZONE_TAB: Record<IsoZoneId, ControlCenterTab> = {
 
 const MOVE_SPEED = 3.2; // grid units per second
 const PLAN_REFRESH_MS = 400;
-/** Below this stage width the floor shows only shapes: tags and bubbles move to the HUD. */
+/** Below this stage width the words on the floor are drawn tighter, not dropped. */
 const COMPACT_WIDTH = 520;
+
+/** The touch pad's three-by-three face, in reading order. */
+const PAD_LAYOUT: ReadonlyArray<ReadonlyArray<CeoDirection | ''>> = [
+  ['', 'up', ''],
+  ['left', '', 'right'],
+  ['', 'down', ''],
+];
 
 interface Runner {
   pos: IsoPoint;
@@ -181,6 +198,19 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
   const [hint, setHint] = useState<string | null>(null);
   const fullscreen = useStageFullscreen();
 
+  // The boss's avatar. Its position lives in a ref because it changes sixty times
+  // a second; only the two facts the HTML shows (which room, who is close) are
+  // state, and both are set only when they actually change.
+  const ceoRef = useRef<{ pos: IsoPoint; facing: IsoFacing; moving: boolean }>({ pos: { ...CEO_SPAWN }, facing: 'down', moving: false });
+  const keysRef = useRef(new Set<CeoDirection>());
+  const padRef = useRef(new Set<CeoDirection>());
+  const zoneRef = useRef<IsoZoneId | 'plaza'>(ceoZoneAt(CEO_SPAWN));
+  const nearRef = useRef<string | null>(null);
+  const [ceoZone, setCeoZone] = useState<IsoZoneId | 'plaza'>(zoneRef.current);
+  const [nearId, setNearId] = useState<string | null>(null);
+  const [stageWidth, setStageWidth] = useState(0);
+  const [coarse, setCoarse] = useState(false);
+
   const agents = overview.agents;
   // `lang` is a dependency because the bubbles and idle chat are sentences.
   const planned = useMemo(() => planIso(agents, overview), [agents, overview, lang]);
@@ -243,6 +273,8 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
       });
 
       const compact = cssW < COMPACT_WIDTH;
+      const greetedId = nearRef.current;
+      const greeted = greetedId ? agents.find(agent => agent.id === greetedId) : undefined;
       paintFrame(ctx, {
         view: stageView,
         width: cssW,
@@ -255,6 +287,15 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
         hoveredZone: hoverRef.current.zone,
         timeMs: now,
         compact,
+        ceo: {
+          pos: ceoRef.current.pos,
+          facing: ceoRef.current.facing,
+          moving: ceoRef.current.moving,
+          zone: zoneRef.current,
+          bubble: greeted ? t('iso.owner.greet', { name: greeted.name }) : null,
+          greetId: greetedId,
+        },
+        ownerLabel: t('iso.owner.name'),
         labels: compact ? [] : [
           ...ISO_ZONES.map(zone => ({
             id: zone.id,
@@ -305,6 +346,31 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
           runner.path = routeTo(runner.pos, scene);
         }
         stepRunner(runner, seconds);
+      }
+
+      // The boss's own feet. The keyboard and the pad feed one direction and
+      // `stepCeo` decides the rest: walls, desks and doorways, with no way to
+      // walk out of the building or through the glass.
+      const ceo = ceoRef.current;
+      const direction = directionVector([...keysRef.current, ...padRef.current]);
+      const stepped = stepCeo(ceo.pos, direction, seconds);
+      ceo.pos = stepped.pos;
+      ceo.moving = Boolean(direction) && stepped.moved;
+      if (direction) ceo.facing = facingFor(direction, ceo.facing);
+
+      // Who is within arm's reach: only ever a wave and a hello.
+      const liveSpots = liveRef.current.map(scene => ({
+        agentId: scene.agentId,
+        spot: runnersRef.current.get(scene.agentId)?.pos ?? scene.spot,
+      }));
+      const greet = nearestNeighbour(ceo.pos, liveSpots, CEO_GREET_RADIUS);
+      nearRef.current = greet;
+      setNearId(previous => (previous === greet ? previous : greet));
+
+      const roomNow = ceoZoneAt(ceo.pos);
+      if (roomNow !== zoneRef.current) {
+        zoneRef.current = roomNow;
+        setCeoZone(roomNow);
       }
 
       draw(now);
@@ -391,6 +457,88 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
     setHover({ zone: null });
   }, []);
 
+  // ── the boss's keyboard ───────────────────────────────────────────────────
+  // WASD and the arrows walk. Typing in a field is typing, never walking, and a
+  // modifier means the browser's shortcut, not ours.
+  useEffect(() => {
+    const held = keysRef.current;
+    const directionOf = (event: KeyboardEvent): CeoDirection | null => {
+      switch (event.key) {
+        case 'ArrowUp': case 'w': case 'W': return 'up';
+        case 'ArrowDown': case 's': case 'S': return 'down';
+        case 'ArrowLeft': case 'a': case 'A': return 'left';
+        case 'ArrowRight': case 'd': case 'D': return 'right';
+        default: return null;
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
+      if (event.key === 'Escape') { onSelect(undefined); return; }
+      const move = directionOf(event);
+      if (move) {
+        event.preventDefault();
+        held.add(move);
+        return;
+      }
+      if (event.key === ' ' || event.key === 'Enter' || event.key === 'e' || event.key === 'E') {
+        const near = nearRef.current;
+        if (!near) return;
+        event.preventDefault();
+        onSelect(near);
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      const move = directionOf(event);
+      if (move) held.delete(move);
+    };
+    const stop = () => { held.clear(); padRef.current.clear(); };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', stop);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', stop);
+    };
+  }, [onSelect]);
+
+  // The pad is for a thumb: shown where the pointer is a finger or the stage is
+  // a phone's width, hidden where a keyboard is the obvious tool.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(entries => {
+      const width = entries[0]?.contentRect.width ?? stage.clientWidth;
+      setStageWidth(previous => (Math.abs(previous - width) < 1 ? previous : width));
+    });
+    observer.observe(stage);
+    setStageWidth(stage.clientWidth);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined;
+    const query = window.matchMedia('(pointer: coarse)');
+    const update = () => setCoarse(query.matches);
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+
+  const padPress = useCallback((direction: CeoDirection, pressed: boolean) => {
+    if (pressed) padRef.current.add(direction);
+    else padRef.current.delete(direction);
+  }, []);
+
+  // A stage that has not been measured yet is treated as narrow: the pad is
+  // drawn on the first paint and taken away on a desktop once the width is known,
+  // which is better than a phone waiting a frame for its only way to walk.
+  const showPad = coarse || stageWidth < 640;
+  const nearAgent = nearId ? agents.find(agent => agent.id === nearId) ?? null : null;
+  const zoneName = ceoZone === 'plaza' ? tr('iso.room.plaza') : tr(ZONE_NAME[ceoZone]);
+
   const hoverLabel = useMemo(() => {
     if (hover.agentId) {
       const agent = agents.find(row => row.id === hover.agentId);
@@ -446,6 +594,48 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
             role="img"
             aria-label={tr('iso.aria', { count: agents.length })}
           />
+
+          {/* The thumb's way around: a translucent pad in the corner, where a
+              hand already is. It sits over the canvas but only its buttons take
+              a touch, so a tap on the floor still picks a room or a person. */}
+          {showPad ? (
+            <div
+              className="pointer-events-none absolute bottom-2.5 right-2.5 grid grid-cols-3 grid-rows-3 gap-1"
+              role="group"
+              aria-label={tr('iso.owner.pad')}
+            >
+              {PAD_LAYOUT.flat().map((direction, index) => (direction ? (
+                <button
+                  key={direction}
+                  type="button"
+                  aria-label={tr(`pixel.walk.${direction}` as MessageKey)}
+                  className="pointer-events-auto flex h-9 w-9 touch-none select-none items-center justify-center rounded-xl border border-white/25 bg-black/45 text-[11px] leading-none text-white/90 backdrop-blur-sm transition active:border-amber-300/70 active:bg-amber-300/25"
+                  onPointerDown={event => {
+                    event.preventDefault();
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    padPress(direction, true);
+                  }}
+                  onPointerUp={() => padPress(direction, false)}
+                  onPointerCancel={() => padPress(direction, false)}
+                  onLostPointerCapture={() => padPress(direction, false)}
+                >
+                  {direction === 'up' ? '▲' : direction === 'down' ? '▼' : direction === 'left' ? '◀' : '▶'}
+                </button>
+              ) : (
+                <span key={`pad-gap-${index}`} className="h-9 w-9" />
+              )))}
+            </div>
+          ) : null}
+
+          {nearAgent ? (
+            <button
+              type="button"
+              onClick={() => onSelect(nearAgent.id)}
+              className="absolute bottom-2.5 left-2.5 max-w-[58%] truncate rounded-full border border-amber-300/45 bg-black/65 px-3 py-1.5 text-[11px] font-semibold text-amber-50 backdrop-blur-sm"
+            >
+              {tr('pixel.talk', { name: nearAgent.name })}
+            </button>
+          ) : null}
 
           {hoverLabel ? (
             <p className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/15 bg-black/65 px-3 py-1.5 text-[11px] font-medium text-white/90 backdrop-blur-sm">
@@ -506,7 +696,13 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
               </span>
             ))}
           </div>
-          <span className="text-[10px] text-white/40">{tr('iso.hint')}</span>
+          <div className="flex items-center gap-2">
+            <span className="flex items-center gap-1.5 rounded-full border border-amber-300/35 bg-amber-300/10 px-2 py-0.5 text-[10px] font-semibold text-amber-100/90">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-300" />
+              {tr('iso.owner.zone', { zone: zoneName })}
+            </span>
+            <span className="hidden max-w-[220px] truncate text-[10px] text-white/40 sm:inline">{tr('iso.hint')}</span>
+          </div>
         </div>
       </div>
 

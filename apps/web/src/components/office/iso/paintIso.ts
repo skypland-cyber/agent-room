@@ -16,7 +16,7 @@
 // Text is drawn in screen space, after the world transform is reset, so a name
 // tag is 10 crisp pixels whether the floor is zoomed out on a phone or filling a
 // desktop screen.
-import { paletteFor, type Palette } from '../pixel/palette.js';
+import { BOSS_PALETTE, paletteFor, type Palette } from '../pixel/palette.js';
 import { gridRectCorners, gridToIso, worldToScreen, type GridRect, type IsoPoint, type IsoView } from './iso.js';
 import {
   ISO_BUILDING,
@@ -24,34 +24,36 @@ import {
   ISO_ZONES,
   LOUNGE_SPOTS,
   MEETING_PODS,
+  zoneDoorway,
   type IsoProp,
   type IsoZone,
 } from './isoPlan.js';
 import type { IsoAgentScene } from './isoScene.js';
+import type { IsoCeoScene } from './isoWalk.js';
 
 type Ctx = CanvasRenderingContext2D;
 
 export const ISO_COLORS = {
   voidTop: '#080d15',
   voidBottom: '#04060a',
-  slabSide: '#0a121c',
-  slabTop: '#101a27',
-  slabEdge: 'rgba(148,205,255,0.22)',
-  grid: 'rgba(148,163,184,0.055)',
-  glass: 'rgba(140,200,255,0.055)',
-  glassEdge: 'rgba(186,230,253,0.5)',
+  slabSide: '#0b1420',
+  slabTop: '#18242f',
+  slabEdge: 'rgba(163,215,255,0.34)',
+  grid: 'rgba(148,163,184,0.075)',
+  glass: 'rgba(147,207,255,0.075)',
+  glassEdge: 'rgba(196,236,255,0.68)',
   ink: '#e5edf7',
   inkSoft: '#a8b7c9',
   inkFaint: '#6d7f95',
-  deskTop: '#1d2a3a',
-  deskSide: '#141d29',
-  deskEdge: 'rgba(190,220,255,0.18)',
-  metal: '#243244',
-  plant: '#2f9e6b',
-  plantDark: '#1d7a50',
-  pot: '#2b3a4d',
-  sofa: '#22303f',
-  sofaTop: '#2b3c4f',
+  deskTop: '#40566d',
+  deskSide: '#1d2b3a',
+  deskEdge: 'rgba(198,226,255,0.3)',
+  metal: '#2b3a4d',
+  plant: '#35a873',
+  plantDark: '#207f55',
+  pot: '#31435a',
+  sofa: '#27384a',
+  sofaTop: '#33475c',
 } as const;
 
 const TONE_COLORS: Record<string, string> = {
@@ -121,14 +123,46 @@ function paintBox(ctx: Ctx, rect: GridRect, height: number, colors: { top: strin
   ctx.closePath();
   ctx.fillStyle = colors.left;
   ctx.fill();
+  // Light falls from the room's far side, so both faces fall away toward the
+  // floor and catch a little light along their top edge. Without it a desk is a
+  // flat silhouette on a dark floor.
+  if (height > 2) {
+    ctx.save();
+    const shade = ctx.createLinearGradient(0, c.y - height, 0, c.y);
+    shade.addColorStop(0, 'rgba(226,240,255,0.14)');
+    shade.addColorStop(0.28, 'rgba(226,240,255,0.03)');
+    shade.addColorStop(1, 'rgba(0,0,0,0.3)');
+    ctx.beginPath();
+    ctx.moveTo(b.x, b.y - height);
+    ctx.lineTo(c.x, c.y - height);
+    ctx.lineTo(d.x, d.y - height);
+    ctx.lineTo(d.x, d.y);
+    ctx.lineTo(c.x, c.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.closePath();
+    ctx.fillStyle = shade;
+    ctx.fill();
+    ctx.restore();
+  }
   // Top.
   fillDiamond(ctx, rect, colors.top, height);
   if (edge) {
     diamondPath(ctx, rect, height);
     ctx.strokeStyle = edge;
-    ctx.lineWidth = 0.8;
+    ctx.lineWidth = 0.9;
     ctx.stroke();
   }
+  // The far two edges of the top catch the light: the line that makes a box read
+  // as a box rather than as a bright diamond floating over a dark one.
+  ctx.save();
+  ctx.strokeStyle = 'rgba(232,244,255,0.32)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(b.x, b.y - height);
+  ctx.lineTo(a.x, a.y - height);
+  ctx.lineTo(d.x, d.y - height);
+  ctx.stroke();
+  ctx.restore();
   // Keep `a` referenced so the corner order stays documented by the compiler.
   void a;
 }
@@ -156,69 +190,144 @@ function isoEllipse(ctx: Ctx, point: IsoPoint, rx: number, ry: number, fill: str
 
 // ─── the room itself ──────────────────────────────────────────────────────
 
-/** Glass partition on a room's two far edges, so a room reads as a room. */
+/** Glass partition on a room's two far edges, cut open where the door is. */
 function paintWall(ctx: Ctx, zone: IsoZone): void {
   if (zone.wall <= 0) return;
   const [a, b, , d] = gridRectCorners(zone.rect);
+  const doorway = zoneDoorway(zone);
   const height = zone.wall;
-  ctx.save();
-  for (const [from, to, alpha] of [[a, b, 1], [a, d, 0.55]] as const) {
-    const grad = ctx.createLinearGradient(from.x, from.y - height, from.x, from.y);
-    grad.addColorStop(0, `rgba(150,205,255,${0.3 * alpha})`);
-    grad.addColorStop(0.55, `rgba(120,175,235,${0.13 * alpha})`);
-    grad.addColorStop(1, 'rgba(90,140,200,0.02)');
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y - height);
-    ctx.lineTo(to.x, to.y - height);
-    ctx.lineTo(to.x, to.y);
-    ctx.lineTo(from.x, from.y);
-    ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
-  }
-  // The top rail: the one line that has to read from across the room.
-  ctx.shadowColor = zone.accent;
-  ctx.shadowBlur = 8;
-  ctx.strokeStyle = zone.accent;
-  ctx.globalAlpha = 0.95;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(b.x, b.y - height);
-  ctx.lineTo(a.x, a.y - height);
-  ctx.lineTo(d.x, d.y - height);
-  ctx.stroke();
-  ctx.globalAlpha = 0.55;
-  ctx.lineWidth = 1.6;
-  ctx.beginPath();
-  ctx.moveTo(a.x, a.y - height);
-  ctx.lineTo(a.x, a.y);
-  ctx.moveTo(b.x, b.y - height);
-  ctx.lineTo(b.x, b.y);
-  ctx.moveTo(d.x, d.y - height);
-  ctx.lineTo(d.x, d.y);
-  ctx.stroke();
-  ctx.restore();
+  const edges = [
+    { edge: 'y-' as const, from: a, to: b, span: zone.rect.w, dim: 1 },
+    { edge: 'x-' as const, from: a, to: d, span: zone.rect.h, dim: 0.58 },
+  ];
 
-  // Two mullions, so the glass is a partition and not a coloured band.
-  ctx.save();
-  ctx.strokeStyle = 'rgba(186,230,253,0.2)';
-  ctx.lineWidth = 0.8;
-  for (const t of [0.34, 0.67]) {
-    for (const [from, to] of [[a, b], [a, d]] as const) {
-      const point = { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
+  for (const { edge, from, to, span, dim } of edges) {
+    // The door is the one place this wall is not there. Its opening is quoted in
+    // tiles along the edge, so it lines up with the passage the walker uses.
+    const cut = doorway.edge === edge
+      ? [Math.max(0.02, (doorway.at - doorway.half) / Math.max(0.01, span)), Math.min(0.98, (doorway.at + doorway.half) / Math.max(0.01, span))]
+      : null;
+    const parts: Array<[number, number]> = cut ? [[0, cut[0]!], [cut[1]!, 1]] : [[0, 1]];
+
+    for (const [t0, t1] of parts) {
+      if (t1 - t0 < 0.005) continue;
+      const p0 = { x: from.x + (to.x - from.x) * t0, y: from.y + (to.y - from.y) * t0 };
+      const p1 = { x: from.x + (to.x - from.x) * t1, y: from.y + (to.y - from.y) * t1 };
+      const grad = ctx.createLinearGradient(p0.x, p0.y - height, p0.x, p0.y);
+      grad.addColorStop(0, `rgba(176,222,255,${0.44 * dim})`);
+      grad.addColorStop(0.55, `rgba(133,190,246,${0.2 * dim})`);
+      grad.addColorStop(1, 'rgba(94,146,205,0.04)');
+      ctx.save();
       ctx.beginPath();
-      ctx.moveTo(point.x, point.y);
-      ctx.lineTo(point.x, point.y - height);
+      ctx.moveTo(p0.x, p0.y - height);
+      ctx.lineTo(p1.x, p1.y - height);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.lineTo(p0.x, p0.y);
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+      // The rail, and the seam of light along the top of the glass.
+      ctx.shadowColor = zone.accent;
+      ctx.shadowBlur = 9;
+      ctx.strokeStyle = zone.accent;
+      ctx.globalAlpha = 0.98;
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y - height);
+      ctx.lineTo(p0.x, p0.y - height);
       ctx.stroke();
+      ctx.globalAlpha = 0.7;
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(232,246,255,0.55)';
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y - height - 1.1);
+      ctx.lineTo(p0.x, p0.y - height - 1.1);
+      ctx.stroke();
+      ctx.restore();
+
+      // Floor seam: where the glass meets the room it should leave a line.
+      ctx.save();
+      ctx.strokeStyle = `rgba(2,8,14,0.75)`;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+      ctx.strokeStyle = `${zone.accent}66`;
+      ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y + 1.1);
+      ctx.lineTo(p1.x, p1.y + 1.1);
+      ctx.stroke();
+      ctx.restore();
+
+      // Two mullions inside this stretch, so the glass is a partition.
+      ctx.save();
+      ctx.strokeStyle = 'rgba(198,236,255,0.3)';
+      ctx.lineWidth = 0.9;
+      for (const t of [0.36, 0.7]) {
+        const point = { x: p0.x + (p1.x - p0.x) * t, y: p0.y + (p1.y - p0.y) * t };
+        if (Math.hypot(point.x - from.x, point.y - from.y) < 6) continue;
+        if (Math.hypot(point.x - to.x, point.y - to.y) < 6) continue;
+        ctx.beginPath();
+        ctx.moveTo(point.x, point.y);
+        ctx.lineTo(point.x, point.y - height);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // A door frame: two lit posts where the glass stops, so the gap reads as a
+    // doorway from across the room rather than as a missing wall.
+    if (cut) {
+      ctx.save();
+      ctx.shadowColor = zone.accent;
+      ctx.shadowBlur = 8;
+      ctx.strokeStyle = zone.accent;
+      ctx.globalAlpha = 0.95;
+      ctx.lineWidth = 2;
+      for (const t of cut) {
+        const point = { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
+        ctx.beginPath();
+        ctx.moveTo(point.x, point.y);
+        ctx.lineTo(point.x, point.y - height);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
   }
+}
+
+/**
+ * The threshold: a short lit strip on the floor at every doorway. Three of the
+ * seven rooms have their door on an open edge, so this is what makes them all
+ * read the same way — and it is the spot the walker crosses.
+ */
+function paintThreshold(ctx: Ctx, zone: IsoZone): void {
+  const doorway = zoneDoorway(zone);
+  const rect = zone.rect;
+  const strip = doorway.edge === 'x-'
+    ? { x: rect.x - 0.16, y: rect.y + doorway.at - doorway.half, w: 0.32, h: doorway.half * 2 }
+    : doorway.edge === 'x+'
+      ? { x: rect.x + rect.w - 0.16, y: rect.y + doorway.at - doorway.half, w: 0.32, h: doorway.half * 2 }
+      : doorway.edge === 'y-'
+        ? { x: rect.x + doorway.at - doorway.half, y: rect.y - 0.16, w: doorway.half * 2, h: 0.32 }
+        : { x: rect.x + doorway.at - doorway.half, y: rect.y + rect.h - 0.16, w: doorway.half * 2, h: 0.32 };
+  ctx.save();
+  ctx.shadowColor = zone.accent;
+  ctx.shadowBlur = 10;
+  fillDiamond(ctx, strip, `${zone.accent}3a`);
+  strokeDiamond(ctx, strip, `${zone.accent}aa`, 1);
+  // The light spilling from the doorway onto the floor beside it.
+  const centre = gridToIso(strip.x + strip.w / 2, strip.y + strip.h / 2);
+  floorGlow(ctx, centre, 26, `${zone.accent}55`, 0.32);
   ctx.restore();
 }
 
 function paintZoneFloor(ctx: Ctx, zone: IsoZone): void {
   const center = gridToIso(zone.rect.x + zone.rect.w / 2, zone.rect.y + zone.rect.h / 2);
   // The plate itself: a touch lighter than the plaza, so a room reads as a room.
-  fillDiamond(ctx, zone.rect, '#1a2836');
+  fillDiamond(ctx, zone.rect, '#20303f');
   // Alternating tiles: the cheapest way to say "floor" rather than "hole".
   ctx.save();
   for (let gy = Math.ceil(zone.rect.y); gy < zone.rect.y + zone.rect.h; gy += 1) {
@@ -226,13 +335,13 @@ function paintZoneFloor(ctx: Ctx, zone: IsoZone): void {
       if ((Math.floor(gx) + Math.floor(gy)) % 2 !== 0) continue;
       const tile = { x: Math.max(gx, zone.rect.x), y: Math.max(gy, zone.rect.y), w: Math.min(1, zone.rect.x + zone.rect.w - gx), h: Math.min(1, zone.rect.y + zone.rect.h - gy) };
       if (tile.w <= 0.02 || tile.h <= 0.02) continue;
-      fillDiamond(ctx, tile, 'rgba(255,255,255,0.03)');
+      fillDiamond(ctx, tile, 'rgba(255,255,255,0.05)');
     }
   }
   ctx.restore();
   const gradient = ctx.createRadialGradient(center.x, center.y, 2, center.x, center.y, Math.max(110, zone.rect.w * 30));
-  gradient.addColorStop(0, `${zone.accent}3d`);
-  gradient.addColorStop(0.6, `${zone.accent}10`);
+  gradient.addColorStop(0, `${zone.accent}4d`);
+  gradient.addColorStop(0.6, `${zone.accent}16`);
   gradient.addColorStop(1, 'rgba(9,15,23,0)');
   diamondPath(ctx, zone.rect);
   ctx.fillStyle = gradient;
@@ -279,8 +388,8 @@ function paintZoneFloor(ctx: Ctx, zone: IsoZone): void {
 
   ctx.save();
   ctx.shadowColor = zone.accent;
-  ctx.shadowBlur = 9;
-  strokeDiamond(ctx, zone.rect, `${zone.accent}80`, 1.1);
+  ctx.shadowBlur = 11;
+  strokeDiamond(ctx, zone.rect, `${zone.accent}a6`, 1.25);
   ctx.restore();
   // A dark seam just outside the neon, which is what makes the edge crisp.
   ctx.save();
@@ -290,7 +399,7 @@ function paintZoneFloor(ctx: Ctx, zone: IsoZone): void {
 
   // Tile grid inside the room, faint enough to be texture rather than noise.
   ctx.save();
-  ctx.strokeStyle = 'rgba(148,163,184,0.05)';
+  ctx.strokeStyle = 'rgba(172,190,210,0.08)';
   ctx.lineWidth = 0.5;
   for (let gx = Math.ceil(zone.rect.x) + 1; gx < zone.rect.x + zone.rect.w; gx += 1) {
     const from = gridToIso(gx, zone.rect.y);
@@ -340,16 +449,16 @@ function paintSlab(ctx: Ctx): void {
   ctx.fillStyle = '#070b11';
   ctx.fill();
 
-  fillDiamond(ctx, box, '#131e2c');
+  fillDiamond(ctx, box, ISO_COLORS.slabTop);
   ctx.save();
-  ctx.shadowColor = 'rgba(56,189,248,0.5)';
-  ctx.shadowBlur = 14;
-  strokeDiamond(ctx, box, 'rgba(148,205,255,0.32)', 1.2);
+  ctx.shadowColor = 'rgba(56,189,248,0.62)';
+  ctx.shadowBlur = 16;
+  strokeDiamond(ctx, box, ISO_COLORS.slabEdge, 1.4);
   ctx.restore();
 
   // The floor's own grid, across the whole platform.
   ctx.save();
-  ctx.strokeStyle = 'rgba(148,163,184,0.07)';
+  ctx.strokeStyle = 'rgba(158,176,198,0.09)';
   ctx.lineWidth = 0.5;
   for (let gx = 1; gx < box.w; gx += 1) {
     const from = gridToIso(gx, 0);
@@ -397,7 +506,7 @@ function paintPlant(ctx: Ctx, prop: IsoProp): void {
 
 function paintDesk(ctx: Ctx, prop: IsoProp, zone: IsoZone): void {
   paintBox(ctx, prop.rect, prop.height, {
-    top: '#35495f', left: '#182533', right: '#223141',
+    top: '#455d76', left: '#1c2a39', right: '#27384a',
   }, 'rgba(190,220,255,0.22)');
   // A keyboard, drawn as one lit line on the desk top.
   const keys = { x: prop.rect.x + prop.rect.w * 0.2, y: prop.rect.y + prop.rect.h * 0.62, w: prop.rect.w * 0.6, h: 0.08 };
@@ -454,7 +563,7 @@ function paintDesk(ctx: Ctx, prop: IsoProp, zone: IsoZone): void {
 }
 
 function paintConsole(ctx: Ctx, prop: IsoProp): void {
-  paintBox(ctx, prop.rect, prop.height, { top: '#24404f', left: '#12202b', right: '#1a2c3a' }, 'rgba(34,211,238,0.75)');
+  paintBox(ctx, prop.rect, prop.height, { top: '#2c4e60', left: '#15252f', right: '#1d3241' }, 'rgba(34,211,238,0.9)');
   const [a, b, c, d] = gridRectCorners({ x: prop.rect.x + 0.08, y: prop.rect.y + 0.08, w: prop.rect.w - 0.16, h: prop.rect.h - 0.16 });
   ctx.save();
   ctx.shadowColor = '#22d3ee';
@@ -556,13 +665,13 @@ function paintBoard(ctx: Ctx, prop: IsoProp, zone: IsoZone): void {
 }
 
 function paintSofa(ctx: Ctx, prop: IsoProp): void {
-  paintBox(ctx, prop.rect, prop.height, { top: '#33465c', left: '#1d2a38', right: '#26374a' }, 'rgba(148,163,184,0.2)');
+  paintBox(ctx, prop.rect, prop.height, { top: '#3d5269', left: '#1f2d3c', right: '#2b3d51' }, 'rgba(168,190,214,0.3)');
   const back = { x: prop.rect.x, y: prop.rect.y, w: prop.rect.w, h: prop.rect.h * 0.35 };
-  paintBox(ctx, back, prop.height + 6, { top: '#33465c', left: '#1c2836', right: '#22303f' });
+  paintBox(ctx, back, prop.height + 6, { top: '#3f546b', left: '#202e3d', right: '#273849' });
 }
 
 function paintShelf(ctx: Ctx, prop: IsoProp): void {
-  paintBox(ctx, prop.rect, prop.height, { top: '#2a3a4d', left: '#19252f', right: '#1f2d3b' }, 'rgba(148,163,184,0.18)');
+  paintBox(ctx, prop.rect, prop.height, { top: '#36495e', left: '#1c2833', right: '#243443' }, 'rgba(168,190,214,0.28)');
   const [a, b, c, d] = gridRectCorners(prop.rect);
   ctx.save();
   ctx.strokeStyle = 'rgba(186,230,253,0.22)';
@@ -580,7 +689,7 @@ function paintShelf(ctx: Ctx, prop: IsoProp): void {
 }
 
 function paintVault(ctx: Ctx, prop: IsoProp, zone: IsoZone): void {
-  paintBox(ctx, prop.rect, prop.height, { top: '#2a2033', left: '#1a1422', right: '#221729' }, `${zone.accent}aa`);
+  paintBox(ctx, prop.rect, prop.height, { top: '#362a44', left: '#1d1626', right: '#281b30' }, `${zone.accent}c4`);
   const [a, b, c, d] = gridRectCorners(prop.rect);
   const faceX = (b.x + c.x) / 2;
   const faceY = (b.y + c.y) / 2 - prop.height * 0.5;
@@ -601,7 +710,7 @@ function paintVault(ctx: Ctx, prop: IsoProp, zone: IsoZone): void {
 }
 
 function paintServer(ctx: Ctx, prop: IsoProp, zone: IsoZone): void {
-  paintBox(ctx, prop.rect, prop.height, { top: '#1b2634', left: '#0f1720', right: '#141f2a' }, 'rgba(148,163,184,0.25)');
+  paintBox(ctx, prop.rect, prop.height, { top: '#243241', left: '#121b24', right: '#18242f' }, 'rgba(168,190,214,0.3)');
   const [a, b, c] = gridRectCorners(prop.rect);
   ctx.save();
   ctx.fillStyle = `${zone.accent}`;
@@ -700,19 +809,19 @@ function paintProp(ctx: Ctx, prop: IsoProp): void {
     case 'rug': paintRug(ctx, prop); break;
     case 'mat': paintMat(ctx, prop); break;
     case 'counter': paintCounter(ctx, prop); break;
-    case 'table': paintBox(ctx, prop.rect, prop.height, { top: '#2e4155', left: '#1a2634', right: '#233243' }, 'rgba(148,163,184,0.2)'); break;
+    case 'table': paintBox(ctx, prop.rect, prop.height, { top: '#3b526c', left: '#1d2a38', right: '#27394b' }, 'rgba(168,190,214,0.3)'); break;
     case 'podTable': paintPodTable(ctx, prop); break;
     case 'podScreen': paintBoard(ctx, prop, zoneForPaint); break;
-    case 'cabinet': paintBox(ctx, prop.rect, prop.height, { top: '#2a3949', left: '#18232d', right: '#1f2b38' }, 'rgba(148,163,184,0.18)'); break;
+    case 'cabinet': paintBox(ctx, prop.rect, prop.height, { top: '#35485c', left: '#1b2731', right: '#233140' }, 'rgba(168,190,214,0.28)'); break;
     case 'chair': paintChair(ctx, prop); break;
     case 'lamp': paintLamp(ctx, prop); break;
     case 'holoPillar': paintHoloPillar(ctx, prop); break;
-    default: paintBox(ctx, prop.rect, prop.height, { top: ISO_COLORS.metal, left: '#182230', right: '#1d2937' }); break;
+    default: paintBox(ctx, prop.rect, prop.height, { top: ISO_COLORS.metal, left: '#1c2734', right: '#22303e' }); break;
   }
 }
 
 function paintPodTable(ctx: Ctx, prop: IsoProp): void {
-  paintBox(ctx, prop.rect, prop.height, { top: '#2c3f55', left: '#182534', right: '#213245' }, 'rgba(96,165,250,0.45)');
+  paintBox(ctx, prop.rect, prop.height, { top: '#3a5069', left: '#1b2a3a', right: '#25384c' }, 'rgba(112,178,255,0.6)');
   const center = gridToIso(prop.rect.x + prop.rect.w / 2, prop.rect.y + prop.rect.h / 2);
   ctx.save();
   ctx.shadowColor = '#60a5fa';
@@ -722,7 +831,7 @@ function paintPodTable(ctx: Ctx, prop: IsoProp): void {
 }
 
 function paintCounter(ctx: Ctx, prop: IsoProp): void {
-  paintBox(ctx, prop.rect, prop.height, { top: '#2a3646', left: '#1a2430', right: '#212d3b' }, 'rgba(148,163,184,0.22)');
+  paintBox(ctx, prop.rect, prop.height, { top: '#374758', left: '#1d2834', right: '#26333f' }, 'rgba(168,190,214,0.32)');
   // Coffee machine on the counter: a box with one hot little LED.
   const machine = { x: prop.rect.x + 0.1, y: prop.rect.y + 0.12, w: prop.rect.w * 0.6, h: prop.rect.h * 0.5 };
   paintBox(ctx, machine, prop.height + 7, { top: '#33404f', left: '#202a36', right: '#27323f' });
@@ -737,10 +846,10 @@ function paintCounter(ctx: Ctx, prop: IsoProp): void {
 
 function paintChair(ctx: Ctx, prop: IsoProp): void {
   paintBox(ctx, { x: prop.rect.x, y: prop.rect.y, w: prop.rect.w, h: prop.rect.h * 0.6 }, prop.height, {
-    top: '#2a3a4d', left: '#1a2532', right: '#22303f',
+    top: '#354a5f', left: '#1c2835', right: '#263647',
   });
   const back = { x: prop.rect.x + prop.rect.w * 0.1, y: prop.rect.y + prop.rect.h * 0.6, w: prop.rect.w * 0.8, h: prop.rect.h * 0.25 };
-  paintBox(ctx, back, prop.height + 8, { top: '#31435a', left: '#1d2937', right: '#263546' });
+  paintBox(ctx, back, prop.height + 8, { top: '#3c5069', left: '#1f2c3b', right: '#2a3b4d' });
 }
 
 function paintLamp(ctx: Ctx, prop: IsoProp): void {
@@ -816,6 +925,7 @@ export function paintStatic(ctx: Ctx, options: PaintOptions): void {
   paintSlab(ctx);
 
   for (const zone of ISO_ZONES) paintZoneFloor(ctx, zone);
+  for (const zone of ISO_ZONES) paintThreshold(ctx, zone);
   for (const zone of ISO_ZONES) paintWall(ctx, zone);
 
   const ordered = [...ISO_PROPS].sort((a, b) => propDepth(a) - propDepth(b));
@@ -825,9 +935,9 @@ export function paintStatic(ctx: Ctx, options: PaintOptions): void {
 
   // Vignette, so the eye lands in the middle.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const vignette = ctx.createRadialGradient(width / 2, height / 2, Math.min(width, height) * 0.2, width / 2, height / 2, Math.max(width, height) * 0.75);
+  const vignette = ctx.createRadialGradient(width / 2, height / 2, Math.min(width, height) * 0.24, width / 2, height / 2, Math.max(width, height) * 0.78);
   vignette.addColorStop(0, 'rgba(0,0,0,0)');
-  vignette.addColorStop(1, 'rgba(2,5,9,0.55)');
+  vignette.addColorStop(1, 'rgba(2,5,9,0.42)');
   ctx.fillStyle = vignette;
   ctx.fillRect(0, 0, width, height);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -840,6 +950,8 @@ export interface AgentPaint {
   name: string;
   status: string;
   palette: Palette;
+  /** The boss: gold ring on the floor, a crown on the head. */
+  owner?: boolean;
 }
 
 function characterHeight(pose: IsoAgentScene['pose']): number {
@@ -852,13 +964,16 @@ function characterHeight(pose: IsoAgentScene['pose']): number {
 }
 
 /** The little figure: a shadow, a body, a head — read at a glance, at any zoom. */
-function drawCharacter(ctx: Ctx, point: IsoPoint, paint: AgentPaint, timeMs: number, index: number, selected: boolean): void {
+function drawCharacter(ctx: Ctx, point: IsoPoint, paint: AgentPaint, timeMs: number, index: number, selected: boolean, walking = false): void {
   const { scene, palette } = paint;
   const seated = scene.pose === 'type' || scene.pose === 'sit';
   const asleep = scene.pose === 'sleep';
+  const stride = walking && !seated ? Math.sin(timeMs / 78) : 0;
   const bob = asleep
     ? Math.sin(timeMs / 900 + index) * 0.4
-    : Math.sin(timeMs / 620 + index * 1.7) * (seated ? 0.5 : 1.2);
+    : walking
+      ? Math.abs(Math.sin(timeMs / 78)) * 1.1
+      : Math.sin(timeMs / 620 + index * 1.7) * (seated ? 0.5 : 1.2);
   const height = characterHeight(scene.pose);
   const feetY = point.y;
   const headY = feetY - height + bob + 4;
@@ -882,6 +997,25 @@ function drawCharacter(ctx: Ctx, point: IsoPoint, paint: AgentPaint, timeMs: num
   ctx.ellipse(point.x, feetY, 8.2, 3.6, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  if (paint.owner) {
+    // The boss's own pool of light: with six people on the floor, the one you
+    // drive has to be findable at a glance.
+    ctx.save();
+    ctx.shadowColor = 'rgba(251,191,36,0.85)';
+    ctx.shadowBlur = 12;
+    ctx.strokeStyle = 'rgba(251,191,36,0.9)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.ellipse(point.x, feetY, 9.6, 4.6, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = 'rgba(251,191,36,0.35)';
+    ctx.beginPath();
+    ctx.ellipse(point.x, feetY, 9.6, 4.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   if (selected) {
     ctx.save();
     ctx.shadowColor = '#7dd3fc';
@@ -896,11 +1030,11 @@ function drawCharacter(ctx: Ctx, point: IsoPoint, paint: AgentPaint, timeMs: num
 
   if (!seated) {
     ctx.fillStyle = palette.pants;
-    ctx.fillRect(point.x - 4, feetY - 10.5, 3.2, 10.5);
-    ctx.fillRect(point.x + 0.9, feetY - 10.5, 3.2, 10.5);
+    ctx.fillRect(point.x - 4 + stride * 1.7, feetY - 10.5, 3.2, 10.5);
+    ctx.fillRect(point.x + 0.9 - stride * 1.7, feetY - 10.5, 3.2, 10.5);
     ctx.fillStyle = palette.shoes;
-    ctx.fillRect(point.x - 4.2, feetY - 2, 3.6, 2);
-    ctx.fillRect(point.x + 0.8, feetY - 2, 3.6, 2);
+    ctx.fillRect(point.x - 4.2 + stride * 1.7, feetY - 2, 3.6, 2);
+    ctx.fillRect(point.x + 0.8 - stride * 1.7, feetY - 2, 3.6, 2);
   }
 
   const torsoTop = headY + headR * 0.7;
@@ -957,12 +1091,31 @@ function drawCharacter(ctx: Ctx, point: IsoPoint, paint: AgentPaint, timeMs: num
     }
   }
 
+  if (paint.owner) {
+    // A small gold crown over the head: at this size a badge cannot be read, but
+    // three points and a band can.
+    const crownY = headY - headR - 1.2;
+    ctx.save();
+    ctx.shadowColor = 'rgba(251,191,36,0.75)';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(point.x - 4.4, crownY);
+    ctx.lineTo(point.x - 4.4, crownY - 2.1);
+    ctx.lineTo(point.x - 2.1, crownY - 0.7);
+    ctx.lineTo(point.x, crownY - 3.3);
+    ctx.lineTo(point.x + 2.1, crownY - 0.7);
+    ctx.lineTo(point.x + 4.4, crownY - 2.1);
+    ctx.lineTo(point.x + 4.4, crownY);
+    ctx.closePath();
+    ctx.fillStyle = '#f7c948';
+    ctx.fill();
+    ctx.restore();
+  }
+
   ctx.restore();
 }
 
 // ─── screen-space text ────────────────────────────────────────────────────
-
-const TAG_FONT = '600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 
 function pill(ctx: Ctx, x: number, y: number, width: number, height: number, radius: number): void {
   ctx.beginPath();
@@ -988,6 +1141,34 @@ export interface FrameLabel {
   tone?: string;
 }
 
+/**
+ * The boss, drawn like the staff and not like them: the same little body, the
+ * boardroom palette, a gold ring on the floor and a crown on the head. It walks
+ * with a stride and stands with the staff's small breath.
+ */
+function drawCeo(ctx: Ctx, ceo: IsoCeoScene, timeMs: number, label: string): void {
+  const point = gridToIso(ceo.pos.x, ceo.pos.y);
+  const paint: AgentPaint = {
+    scene: {
+      agentId: 'ceo',
+      zone: ceo.zone === 'plaza' ? 'ceo' : ceo.zone,
+      pose: 'stand',
+      spot: ceo.pos,
+      facing: ceo.facing,
+      bubble: null,
+      bubbleTone: 'info',
+      needsBoss: false,
+      alpha: 1,
+      rest: false,
+    },
+    name: label,
+    status: 'owner',
+    palette: BOSS_PALETTE,
+    owner: true,
+  };
+  drawCharacter(ctx, { x: point.x, y: point.y - 1 }, paint, timeMs, 0, false, ceo.moving);
+}
+
 export interface FrameOptions {
   view: IsoView;
   width: number;
@@ -999,14 +1180,23 @@ export interface FrameOptions {
   hoveredId?: string;
   hoveredZone?: string | null;
   timeMs: number;
-  /** Small stages drop the tags and bubbles: the HUD below carries them instead. */
+  /**
+   * A narrow stage. It used to mean "drop the words"; it now only means "draw
+   * them tighter" — a phone still has to show who is who and what they said.
+   */
   compact: boolean;
   /** Room signs, already localised and placed by the caller. */
   labels?: FrameLabel[];
+  /** The boss, when the page hands the avatar over. */
+  ceo?: IsoCeoScene | null;
+  /** The word on the boss's tag, already localised. */
+  ownerLabel?: string;
 }
 
 export function paintFrame(ctx: Ctx, options: FrameOptions): void {
   const { view, width, height, dpr, scenes, agents, selectedId, hoveredId, hoveredZone, timeMs, compact } = options;
+  const plan = frameTextPlan(compact);
+  const metrics = plan.metrics;
   // The floor was blitted by the caller; this pass starts from device pixels.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
@@ -1023,71 +1213,119 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
   if (hoveredZone && hoveredZone !== 'plaza') {
     const zone = ISO_ZONES.find(row => row.id === hoveredZone);
     if (zone) {
-      fillDiamond(ctx, zone.rect, `${zone.accent}1f`);
-      strokeDiamond(ctx, zone.rect, `${zone.accent}aa`, 1.2);
+      fillDiamond(ctx, zone.rect, `${zone.accent}26`);
+      strokeDiamond(ctx, zone.rect, `${zone.accent}bb`, 1.4);
     }
   }
 
-  paints
-    .map((paint, index) => ({ paint, index, depth: paint.scene.spot.x + paint.scene.spot.y }))
-    .sort((a, b) => a.depth - b.depth)
-    .forEach(({ paint, index }) => {
-      const point = gridToIso(paint.scene.spot.x, paint.scene.spot.y);
-      drawCharacter(ctx, { x: point.x, y: point.y - 1 }, paint, timeMs, index, selectedId === paint.scene.agentId);
-    });
+  // People and the boss share one depth order, so a desk, an agent and the boss
+  // can never be painted in the wrong order relative to each other.
+  const figures: Array<{ depth: number; paint: AgentPaint | null; ceo: IsoCeoScene | null; index: number }> = [
+    ...paints.map((paint, index) => ({ depth: paint.scene.spot.x + paint.scene.spot.y, paint, ceo: null, index })),
+    ...(options.ceo ? [{ depth: options.ceo.pos.x + options.ceo.pos.y, paint: null, ceo: options.ceo, index: 0 }] : []),
+  ];
+  figures.sort((a, b) => a.depth - b.depth);
+  for (const figure of figures) {
+    if (figure.ceo) {
+      drawCeo(ctx, figure.ceo, timeMs, options.ownerLabel ?? 'CEO');
+      continue;
+    }
+    const paint = figure.paint!;
+    const point = gridToIso(paint.scene.spot.x, paint.scene.spot.y);
+    drawCharacter(ctx, { x: point.x, y: point.y - 1 }, paint, timeMs, figure.index, selectedId === paint.scene.agentId);
+  }
   ctx.restore();
 
   // ── screen space: tags, bubbles, the "!" ───────────────────────────────
-  // From here on the canvas is back in CSS pixels, so a name tag is 10 real
-  // pixels whether the floor is fitted to a phone or filling a desktop.
+  // From here on the canvas is back in CSS pixels, so a name tag is real pixels
+  // whether the floor is fitted to a phone or filling a desktop screen.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const toScreen = (point: IsoPoint) => worldToScreen(view, point);
 
-  for (const label of options.labels ?? []) drawRoomLabel(ctx, label);
+  if (plan.showRoomLabels) {
+    for (const label of options.labels ?? []) drawRoomLabel(ctx, label);
+  }
 
-  // Bubbles first, so tags sit on top of them where they overlap.
-  if (!compact) {
-    ctx.save();
-    ctx.font = BUBBLE_FONT;
-    const widthOf = (text: string) => ctx.measureText(text).width;
-    ctx.restore();
-    const lift = (scene: IsoAgentScene) => characterHeight(scene.pose) * view.scale + 26;
-    const placements = layoutIsoBubbles(
-      paints
-        .filter(paint => paint.scene.bubble)
-        .map(paint => {
-          const point = toScreen(gridToIso(paint.scene.spot.x, paint.scene.spot.y));
-          return {
-            id: paint.scene.agentId,
-            x: point.x,
-            bottomY: point.y - lift(paint.scene),
-            text: paint.scene.bubble!,
-            gauge: paint.scene.progress !== undefined,
-          };
-        }),
-      { widthOf, mapWidth: width, mapHeight: height },
-    );
+  // Bubbles first, so tags sit on top of them where they overlap. Every speaker
+  // with something to say gets one, at any stage width.
+  let placements = new Map<string, IsoBubble>();
+  if (plan.showBubbles) {
+    const widthOf = measureWith(ctx, metrics.bubble.font);
+    const lift = (height: number) => height * view.scale + (compact ? 22 : 26);
+    const requests: IsoBubbleRequest[] = [];
+    for (const paint of paints) {
+      if (!paint.scene.bubble) continue;
+      const point = toScreen(gridToIso(paint.scene.spot.x, paint.scene.spot.y));
+      requests.push({
+        id: paint.scene.agentId,
+        x: point.x,
+        bottomY: point.y - lift(characterHeight(paint.scene.pose)),
+        text: paint.scene.bubble,
+        gauge: paint.scene.progress !== undefined,
+      });
+    }
+    if (options.ceo?.bubble) {
+      const point = toScreen(gridToIso(options.ceo.pos.x, options.ceo.pos.y));
+      requests.push({ id: 'ceo', x: point.x, bottomY: point.y - lift(characterHeight('stand')), text: options.ceo.bubble });
+    }
+    placements = layoutIsoBubbles(requests, {
+      widthOf,
+      mapWidth: width,
+      mapHeight: height,
+      metrics: metrics.bubble,
+    });
     for (const paint of paints) {
       if (!paint.scene.bubble) continue;
       const placement = placements.get(paint.scene.agentId);
       if (!placement) continue;
-      drawBubble(ctx, placement, paint.scene.bubbleTone, paint.scene.progress);
+      drawBubble(ctx, placement, paint.scene.bubbleTone, paint.scene.progress, metrics.bubble);
     }
+    const own = placements.get('ceo');
+    if (own) drawBubble(ctx, own, 'good', undefined, metrics.bubble);
   }
 
+  // Tags: every agent, plus the boss, laid out so none sits on another. On a
+  // phone the characters are a dozen pixels apart, so this is what keeps six
+  // names readable instead of one pile.
+  const tagRequests: TagRequest[] = [];
+  if (options.ceo) {
+    const point = toScreen(gridToIso(options.ceo.pos.x, options.ceo.pos.y));
+    tagRequests.push({
+      id: 'ceo',
+      x: point.x,
+      y: point.y - characterHeight('stand') * view.scale - 6,
+      text: options.ownerLabel ?? 'CEO',
+      width: tagWidth(measureWith(ctx, metrics.tag.font), options.ownerLabel ?? 'CEO', metrics) + 6,
+      height: metrics.tag.height,
+    });
+  }
   for (const paint of paints) {
     const scene = paint.scene;
     const point = toScreen(gridToIso(scene.spot.x, scene.spot.y));
-    const headY = point.y - characterHeight(scene.pose) * view.scale - 4;
-    const highlight = selectedId === scene.agentId || hoveredId === scene.agentId;
-
-    if (scene.needsBoss) {
-      drawNeedsBoss(ctx, point.x + 11, headY - 16, timeMs);
-    }
-    if (!compact || highlight) {
-      drawNameTag(ctx, point.x, headY - 10, paint, highlight);
-    }
+    const text = shortName(paint.name);
+    tagRequests.push({
+      id: scene.agentId,
+      x: point.x,
+      y: point.y - characterHeight(scene.pose) * view.scale - 6,
+      text,
+      width: tagWidth(measureWith(ctx, metrics.tag.font), text, metrics),
+      height: metrics.tag.height,
+    });
   }
+  const bubbleRects = [...placements.values()].map(box => ({ left: box.left, top: box.top, width: box.width, height: box.height }));
+  const tags = layoutAgentTags(tagRequests, { mapWidth: width, mapHeight: height, edge: metrics.bubble.edge, avoid: bubbleRects });
+
+  for (const paint of paints) {
+    const scene = paint.scene;
+    const tag = tags.get(scene.agentId);
+    if (!tag) continue;
+    const highlight = selectedId === scene.agentId || hoveredId === scene.agentId;
+    if (scene.needsBoss) drawNeedsBoss(ctx, tag.left + tag.width + 8, tag.top + tag.height / 2, timeMs);
+    drawNameTag(ctx, tag, paint, highlight, metrics);
+    if (options.ceo?.greetId === scene.agentId) drawWave(ctx, tag.left - 9, tag.top + tag.height / 2, timeMs);
+  }
+  const ownTag = tags.get('ceo');
+  if (ownTag) drawOwnerTag(ctx, ownTag, options.ownerLabel ?? 'CEO', metrics, timeMs);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
@@ -1147,32 +1385,89 @@ function drawNeedsBoss(ctx: Ctx, x: number, y: number, timeMs: number): void {
   ctx.restore();
 }
 
-function drawNameTag(ctx: Ctx, x: number, y: number, paint: AgentPaint, highlight: boolean): void {
-  const name = paint.name.length > 12 ? `${paint.name.slice(0, 11)}…` : paint.name;
+function drawNameTag(ctx: Ctx, tag: TagPlacement, paint: AgentPaint, highlight: boolean, metrics: FrameTextMetrics): void {
   ctx.save();
-  ctx.font = TAG_FONT;
-  const textWidth = ctx.measureText(name).width;
-  const width = Math.max(24, textWidth + 16);
-  const height = 14;
-  const left = Math.round(x - width / 2);
-  const top = Math.round(y - height);
   ctx.globalAlpha = paint.scene.alpha;
-  pill(ctx, left, top, width, height, 7);
-  ctx.fillStyle = highlight ? 'rgba(12,26,38,0.95)' : 'rgba(8,14,22,0.82)';
+  ctx.font = metrics.tag.font;
+  const row = metrics.tag;
+  pill(ctx, tag.left, tag.top, tag.width, tag.height, row.radius);
+  ctx.fillStyle = highlight ? 'rgba(15,32,47,0.96)' : 'rgba(9,16,25,0.86)';
   ctx.fill();
-  ctx.strokeStyle = highlight ? 'rgba(125,211,252,0.9)' : 'rgba(148,163,184,0.28)';
+  ctx.strokeStyle = highlight ? 'rgba(125,211,252,0.95)' : 'rgba(160,182,206,0.34)';
   ctx.lineWidth = 1;
   ctx.stroke();
   // Status dot: the same five colours the roster uses.
   ctx.beginPath();
-  ctx.arc(left + 7, top + height / 2, 2.4, 0, Math.PI * 2);
+  ctx.arc(tag.left + 6, tag.top + tag.height / 2, row.dot, 0, Math.PI * 2);
   ctx.fillStyle = statusColor(paint.status);
   ctx.fill();
-  ctx.fillStyle = highlight ? '#f8fbff' : '#cfdbe8';
+  ctx.fillStyle = highlight ? '#ffffff' : '#d8e4f0';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
-  ctx.font = TAG_FONT;
-  ctx.fillText(name, left + 12.5, top + height / 2 + 0.5);
+  ctx.font = row.font;
+  ctx.fillText(shortName(paint.name), tag.left + row.padX, tag.top + tag.height / 2 + 0.5);
+  ctx.restore();
+}
+
+/**
+ * The boss's tag: the same pill in gold, with a small crown where the status dot
+ * would be. It is the one label on the floor that is not about work, so it is
+ * the one label that is not slate.
+ */
+function drawOwnerTag(ctx: Ctx, tag: TagPlacement, label: string, metrics: FrameTextMetrics, timeMs: number): void {
+  const row = metrics.tag;
+  const glow = 0.62 + Math.sin(timeMs / 620) * 0.18;
+  ctx.save();
+  ctx.font = row.font;
+  ctx.shadowColor = 'rgba(251,191,36,0.55)';
+  ctx.shadowBlur = 10 * glow;
+  pill(ctx, tag.left, tag.top, tag.width, tag.height, row.radius);
+  ctx.fillStyle = 'rgba(30,22,6,0.92)';
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = `rgba(251,191,36,${0.55 + glow * 0.35})`;
+  ctx.lineWidth = 1.1;
+  ctx.stroke();
+  // Crown, small enough to sit where a status dot sits.
+  const crownX = tag.left + 6;
+  const crownY = tag.top + tag.height / 2 + 1.6;
+  ctx.beginPath();
+  ctx.moveTo(crownX - 3.2, crownY);
+  ctx.lineTo(crownX - 3.2, crownY - 2.2);
+  ctx.lineTo(crownX - 1.4, crownY - 0.7);
+  ctx.lineTo(crownX, crownY - 3);
+  ctx.lineTo(crownX + 1.4, crownY - 0.7);
+  ctx.lineTo(crownX + 3.2, crownY - 2.2);
+  ctx.lineTo(crownX + 3.2, crownY);
+  ctx.closePath();
+  ctx.fillStyle = '#f7c948';
+  ctx.fill();
+  ctx.fillStyle = '#fff3cf';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = row.font;
+  ctx.fillText(label, tag.left + row.padX, tag.top + tag.height / 2 + 0.5);
+  ctx.restore();
+}
+
+/** A gold wave over the head of whoever the boss just walked up to. */
+function drawWave(ctx: Ctx, x: number, y: number, timeMs: number): void {
+  const pulse = 1 + Math.sin(timeMs / 220) * 0.12;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(pulse, pulse);
+  ctx.shadowColor = 'rgba(251,191,36,0.8)';
+  ctx.shadowBlur = 8;
+  ctx.beginPath();
+  ctx.arc(0, 0, 6.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#f7c948';
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = '700 8px -apple-system, BlinkMacSystemFont, "Segoe UI", "Segoe UI Emoji", Roboto, sans-serif';
+  ctx.fillStyle = '#241a06';
+  ctx.fillText('👋', 0, 0.5);
   ctx.restore();
 }
 
@@ -1186,24 +1481,88 @@ export function statusColor(status: string): string {
   }
 }
 
-// ─── bubbles ──────────────────────────────────────────────────────────────
+// ─── bubbles and tags ─────────────────────────────────────────────────────
 //
 // The pixel floor's bubbles are 96px wide, sized for an 8px monospace font. The
 // control centre's are read at arm's length on a dark glass panel, so they get a
 // readable sans face, a wider box and their own placement rules: inside the
 // stage, and stacked upward when two speakers overlap. Nothing is shared with
 // the pixel layout because the metrics are the only thing it encodes.
+//
+// Two sizes, not two modes. A phone (a stage under 520px) gets the compact
+// metrics — a smaller face, a narrower box, two lines instead of three — but it
+// still gets every name tag and every bubble. The first version of this floor
+// dropped the words entirely below that width, which on an iPhone left the
+// office silent: six characters walking around with nothing over their heads.
 
-export const BUBBLE_FONT = '600 9.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
-const BUBBLE_LINE_HEIGHT = 13;
-const BUBBLE_PAD_X = 6;
-const BUBBLE_PAD_Y = 4;
-const BUBBLE_MAX_WIDTH = 122;
-const BUBBLE_MIN_WIDTH = 34;
-const BUBBLE_GAUGE_HEIGHT = 6;
-const BUBBLE_GAP = 4;
-const BUBBLE_MAX_LINES = 3;
-const BUBBLE_EDGE = 4;
+export interface BubbleMetrics {
+  font: string;
+  lineHeight: number;
+  padX: number;
+  padY: number;
+  maxWidth: number;
+  minWidth: number;
+  gauge: number;
+  gap: number;
+  maxLines: number;
+  edge: number;
+}
+
+export interface TagMetrics {
+  font: string;
+  height: number;
+  padX: number;
+  radius: number;
+  dot: number;
+  /** Extra width the boss's tag needs on the right for its little crown. */
+  crown: number;
+}
+
+export interface FrameTextMetrics {
+  bubble: BubbleMetrics;
+  tag: TagMetrics;
+}
+
+const SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+
+export const FULL_TEXT_METRICS: FrameTextMetrics = {
+  bubble: { font: `600 9.5px ${SANS}`, lineHeight: 13, padX: 6, padY: 4, maxWidth: 122, minWidth: 34, gauge: 6, gap: 4, maxLines: 3, edge: 4 },
+  tag: { font: `600 10px ${SANS}`, height: 14, padX: 12.5, radius: 7, dot: 2.4, crown: 0 },
+};
+
+export const COMPACT_TEXT_METRICS: FrameTextMetrics = {
+  bubble: { font: `600 8.5px ${SANS}`, lineHeight: 11, padX: 4, padY: 3, maxWidth: 84, minWidth: 26, gauge: 5, gap: 3, maxLines: 2, edge: 3 },
+  tag: { font: `600 8.5px ${SANS}`, height: 12, padX: 10, radius: 6, dot: 2, crown: 0 },
+};
+
+export function frameTextMetrics(compact: boolean): FrameTextMetrics {
+  return compact ? COMPACT_TEXT_METRICS : FULL_TEXT_METRICS;
+}
+
+export interface FrameTextPlan {
+  /** Room signs: the one thing a narrow stage drops, because the HUD below lists the rooms. */
+  showRoomLabels: boolean;
+  /** Never false: a phone has to show who is speaking. */
+  showBubbles: boolean;
+  /** Never false: a phone has to show who is who. */
+  showTags: boolean;
+  metrics: FrameTextMetrics;
+}
+
+export function frameTextPlan(compact: boolean): FrameTextPlan {
+  return { showRoomLabels: !compact, showBubbles: true, showTags: true, metrics: frameTextMetrics(compact) };
+}
+
+/** Kept for the tests and the pixel floor's vocabulary: the desktop bubble face. */
+export const BUBBLE_FONT = FULL_TEXT_METRICS.bubble.font;
+
+function measureWith(ctx: Ctx, font: string): (text: string) => number {
+  ctx.save();
+  ctx.font = font;
+  const widthOf = (text: string) => ctx.measureText(text).width;
+  ctx.restore();
+  return widthOf;
+}
 
 export interface IsoBubble {
   id: string;
@@ -1227,10 +1586,10 @@ export interface IsoBubbleRequest {
   gauge?: boolean;
 }
 
-/** The lines of a bubble: one per `\n`, empty ones dropped, at most three. */
-export function isoBubbleLines(text: string): string[] {
+/** The lines of a bubble: one per `\n`, empty ones dropped, at most the metric's limit. */
+export function isoBubbleLines(text: string, maxLines = FULL_TEXT_METRICS.bubble.maxLines): string[] {
   const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-  return (lines.length > 0 ? lines : ['']).slice(0, BUBBLE_MAX_LINES);
+  return (lines.length > 0 ? lines : ['']).slice(0, Math.max(1, maxLines));
 }
 
 /** Cut a line to the box, on a word where the language allows it. */
@@ -1250,28 +1609,30 @@ export function fitBubbleLine(text: string, maxWidth: number, widthOf: (text: st
  */
 export function layoutIsoBubbles(
   requests: IsoBubbleRequest[],
-  options: { widthOf: (text: string) => number; mapWidth: number; mapHeight: number },
+  options: { widthOf: (text: string) => number; mapWidth: number; mapHeight: number; metrics?: BubbleMetrics },
 ): Map<string, IsoBubble> {
   const { widthOf, mapWidth, mapHeight } = options;
+  const metrics = options.metrics ?? FULL_TEXT_METRICS.bubble;
+  const edge = Math.max(2, metrics.edge);
   const placed: Array<{ left: number; right: number; top: number; bottom: number; bubble: IsoBubble }> = [];
   const ordered = [...requests].sort((a, b) => (a.bottomY - b.bottomY) || (a.x - b.x));
 
   for (const request of ordered) {
-    const lines = isoBubbleLines(request.text);
-    const inner = BUBBLE_MAX_WIDTH - BUBBLE_PAD_X * 2;
+    const lines = isoBubbleLines(request.text, metrics.maxLines);
+    const inner = metrics.maxWidth - metrics.padX * 2;
     const fitted = lines.map(line => fitBubbleLine(line, inner, widthOf));
     const textWidth = Math.max(...fitted.map(line => widthOf(line)));
-    const width = Math.round(Math.max(BUBBLE_MIN_WIDTH, Math.min(BUBBLE_MAX_WIDTH, textWidth + BUBBLE_PAD_X * 2)));
-    const height = BUBBLE_LINE_HEIGHT * fitted.length + BUBBLE_PAD_Y * 2 + (request.gauge ? BUBBLE_GAUGE_HEIGHT : 0);
-    const left = Math.round(Math.min(Math.max(request.x - width / 2, BUBBLE_EDGE), Math.max(BUBBLE_EDGE, mapWidth - BUBBLE_EDGE - width)));
+    const width = Math.round(Math.max(metrics.minWidth, Math.min(metrics.maxWidth, textWidth + metrics.padX * 2)));
+    const height = Math.round(metrics.lineHeight * fitted.length + metrics.padY * 2 + (request.gauge ? metrics.gauge : 0));
+    const left = Math.round(Math.min(Math.max(request.x - width / 2, edge), Math.max(edge, mapWidth - edge - width)));
     let top = Math.round(request.bottomY - height);
-    top = Math.max(BUBBLE_EDGE, Math.min(top, mapHeight - BUBBLE_EDGE - height));
+    top = Math.max(edge, Math.min(top, Math.max(edge, mapHeight - edge - height)));
 
-    for (let stack = 0; stack < 6; stack += 1) {
+    for (let stack = 0; stack < 8; stack += 1) {
       const clash = placed.some(row => left < row.right && row.left < left + width && top < row.bottom && row.top < top + height);
       if (!clash) break;
-      const next = top - (height + BUBBLE_GAP);
-      if (next < BUBBLE_EDGE) break;
+      const next = top - (height + metrics.gap);
+      if (next < edge) break;
       top = next;
     }
 
@@ -1291,17 +1652,113 @@ export function layoutIsoBubbles(
   return new Map(placed.map(row => [row.bubble.id, row.bubble]));
 }
 
-function drawBubble(ctx: Ctx, placement: IsoBubble, tone: string, progress?: number): void {
+// ─── name tags ────────────────────────────────────────────────────────────
+
+export interface TagRequest {
+  id: string;
+  /** Where the tag would like to be: centred over the head, sitting on `y`. */
+  x: number;
+  y: number;
+  text: string;
+  width: number;
+  height: number;
+}
+
+export interface TagPlacement {
+  id: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** The width a tag needs, from the metrics and the text. */
+export function tagWidth(widthOf: (text: string) => number, text: string, metrics: FrameTextMetrics): number {
+  return Math.max(24, Math.round(widthOf(text) + metrics.tag.padX * 2));
+}
+
+/** A name that fits a tag: eleven characters and an ellipsis is plenty. */
+export function shortName(name: string): string {
+  return name.length > 12 ? `${name.slice(0, 11)}…` : name;
+}
+
+/**
+ * Place the tags so that none sits on another. On a phone the six seats are a
+ * dozen screen pixels apart, so the natural position of two tags is the same
+ * position; a tag that clashes steps sideways, and only if both sides are off
+ * the stage does it climb. The boss's tag is requested first, so it keeps its
+ * place and everyone else moves around it.
+ */
+export function layoutAgentTags(
+  requests: TagRequest[],
+  options: { mapWidth: number; mapHeight: number; edge?: number; avoid?: ReadonlyArray<{ left: number; top: number; width: number; height: number }> },
+): Map<string, TagPlacement> {
+  const edge = Math.max(2, options.edge ?? 3);
+  const placed: TagPlacement[] = [];
+  const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), Math.max(min, max));
+  // Bubbles are already on the stage when the tags are placed: a tag that lands
+  // on one hides a sentence, so they count as taken space.
+  const avoid = (options.avoid ?? []).map(rect => ({ id: 'bubble', ...rect }));
+
+  for (const request of requests) {
+    const width = Math.round(request.width);
+    const height = Math.round(request.height);
+    const naturalLeft = Math.round(clamp(request.x - width / 2, edge, options.mapWidth - edge - width));
+    const naturalTop = Math.round(clamp(request.y - height, edge, options.mapHeight - edge - height));
+    const fits = (left: number, top: number) => left >= edge
+      && left + width <= options.mapWidth - edge
+      && top >= edge
+      && top + height <= options.mapHeight - edge
+      && ![...placed, ...avoid].some(row =>
+        left < row.left + row.width && row.left < left + width
+        && top < row.top + row.height && row.top < top + height);
+
+    let left = naturalLeft;
+    let top = naturalTop;
+    if (!fits(left, top)) {
+      // Walk outward: to the side first (a tag wants to stay over its head), then
+      // above and below. Eight rings is more than a stage can hold, so a place is
+      // always found while there is floor left.
+      let found = false;
+      for (let ring = 1; ring <= 8 && !found; ring += 1) {
+        for (const [stepX, stepY] of [[1, 0], [-1, 0], [0, -1], [0, 1]] as const) {
+          const candidateLeft = Math.round(clamp(
+            naturalLeft + stepX * ring * (width + 4),
+            edge,
+            options.mapWidth - edge - width,
+          ));
+          const candidateTop = Math.round(clamp(
+            naturalTop + stepY * ring * (height + 2),
+            edge,
+            options.mapHeight - edge - height,
+          ));
+          if (!fits(candidateLeft, candidateTop) || (candidateLeft === left && candidateTop === top)) continue;
+          left = candidateLeft;
+          top = candidateTop;
+          found = true;
+          break;
+        }
+      }
+    }
+
+    placed.push({ id: request.id, left, top, width, height });
+  }
+
+  return new Map(placed.map(row => [row.id, row]));
+}
+
+function drawBubble(ctx: Ctx, placement: IsoBubble, tone: string, progress: number | undefined, metrics: BubbleMetrics): void {
   const accent = toneColor(tone);
+  const radius = Math.min(7, metrics.padY + 3);
   ctx.save();
-  ctx.font = BUBBLE_FONT;
-  ctx.shadowColor = 'rgba(0,0,0,0.55)';
+  ctx.font = metrics.font;
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
   ctx.shadowBlur = 10;
-  pill(ctx, placement.left, placement.top, placement.width, placement.height, 7);
-  ctx.fillStyle = 'rgba(9,16,25,0.92)';
+  pill(ctx, placement.left, placement.top, placement.width, placement.height, radius);
+  ctx.fillStyle = 'rgba(11,18,28,0.95)';
   ctx.fill();
   ctx.shadowBlur = 0;
-  ctx.strokeStyle = `${accent}88`;
+  ctx.strokeStyle = `${accent}a6`;
   ctx.lineWidth = 1;
   ctx.stroke();
   // Tail down to the speaker.
@@ -1310,23 +1767,23 @@ function drawBubble(ctx: Ctx, placement: IsoBubble, tone: string, progress?: num
   ctx.lineTo(placement.tailX, Math.max(placement.top + placement.height + 1, placement.anchorY - 4));
   ctx.lineTo(placement.tailX + 4, placement.top + placement.height - 0.5);
   ctx.closePath();
-  ctx.fillStyle = 'rgba(9,16,25,0.92)';
+  ctx.fillStyle = 'rgba(11,18,28,0.95)';
   ctx.fill();
 
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   placement.lines.forEach((line, index) => {
-    ctx.fillStyle = index === 0 ? '#eef6ff' : '#a9bccd';
-    ctx.font = index === 0 ? BUBBLE_FONT : '500 11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-    ctx.fillText(line, placement.left + BUBBLE_PAD_X, placement.top + BUBBLE_PAD_Y + index * BUBBLE_LINE_HEIGHT);
+    ctx.fillStyle = index === 0 ? '#f1f8ff' : '#b3c5d6';
+    ctx.font = index === 0 ? metrics.font : metrics.font.replace(/^600/, '500');
+    ctx.fillText(line, placement.left + metrics.padX, placement.top + metrics.padY + index * metrics.lineHeight);
   });
   if (progress !== undefined) {
-    const barY = placement.top + placement.height - BUBBLE_GAUGE_HEIGHT + 1;
-    const barW = placement.width - BUBBLE_PAD_X * 2;
-    ctx.fillStyle = 'rgba(148,163,184,0.25)';
-    ctx.fillRect(placement.left + BUBBLE_PAD_X, barY, barW, 2.5);
+    const barY = placement.top + placement.height - metrics.gauge + 1;
+    const barW = placement.width - metrics.padX * 2;
+    ctx.fillStyle = 'rgba(148,163,184,0.28)';
+    ctx.fillRect(placement.left + metrics.padX, barY, barW, 2.5);
     ctx.fillStyle = accent;
-    ctx.fillRect(placement.left + BUBBLE_PAD_X, barY, Math.max(1, (barW * Math.max(0, Math.min(100, progress))) / 100), 2.5);
+    ctx.fillRect(placement.left + metrics.padX, barY, Math.max(1, (barW * Math.max(0, Math.min(100, progress))) / 100), 2.5);
   }
   ctx.restore();
 }
