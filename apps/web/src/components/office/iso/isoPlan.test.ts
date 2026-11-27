@@ -8,6 +8,8 @@ import { gridRectBounds, gridToIso, isInsideGridRect, isoToGrid } from './iso.js
 import {
   ALL_DESKS,
   ANALYSIS_DESKS,
+  BREAK_SPOTS,
+  CAFE_SPOTS,
   CEO_WAIT_SPOTS,
   CONTROL_DESK,
   DEV_DESKS,
@@ -25,8 +27,8 @@ import {
 } from './isoPlan.js';
 
 describe('the isometric floor plan', () => {
-  it('keeps all six spaces plus the lounge inside the building', () => {
-    expect(ISO_ZONES).toHaveLength(7);
+  it('keeps all seven rooms, the lounge and the cafe wing inside the building', () => {
+    expect(ISO_ZONES).toHaveLength(8);
     for (const zone of ISO_ZONES) {
       expect(zone.rect.x).toBeGreaterThanOrEqual(ISO_BUILDING.x);
       expect(zone.rect.y).toBeGreaterThanOrEqual(ISO_BUILDING.y);
@@ -85,7 +87,7 @@ describe('the isometric floor plan', () => {
       ...ALL_DESKS.map(desk => ({ at: desk.stand, id: desk.id })),
       ...CEO_WAIT_SPOTS.map((at, index) => ({ at, id: `ceo-${index}` })),
       ...OVERFLOW_SPOTS.map((at, index) => ({ at, id: `overflow-${index}` })),
-      ...LOUNGE_SPOTS.map((at, index) => ({ at, id: `lounge-${index}` })),
+      ...BREAK_SPOTS.map((at, index) => ({ at, id: `break-${index}` })),
       ...MEETING_PODS.flatMap(pod => pod.seats.map((at, index) => ({ at, id: `pod-${pod.index}-${index}` }))),
     ];
     const seen = new Map<string, string>();
@@ -93,6 +95,35 @@ describe('the isometric floor plan', () => {
       const key = `${seat.at.x.toFixed(2)},${seat.at.y.toFixed(2)}`;
       expect(seen.has(key), `${seat.id} shares ${key} with ${seen.get(key)}`).toBe(false);
       seen.set(key, seat.id);
+    }
+  });
+
+  it('gives the cafe one long bar, a table for every pair and a door that is not a counter', () => {
+    const cafe = ISO_ZONES.find(zone => zone.id === 'cafe')!;
+    expect(cafe.rect.w).toBeGreaterThan(12);
+    expect(cafe.windows).toBe(true);
+    expect(CAFE_SPOTS.length).toBeGreaterThanOrEqual(6);
+    for (const spot of CAFE_SPOTS) {
+      expect(isInsideGridRect(cafe.rect, spot.x, spot.y), `${spot.x},${spot.y}`).toBe(true);
+    }
+    // Nothing with a top stands in the doorway: the room has to be enterable.
+    const door = { x: cafe.door.x - 0.55, y: cafe.door.y + 0.05, w: 1.1, h: 0.6 };
+    for (const prop of ISO_PROPS) {
+      if (prop.height <= 0) continue;
+      const overlaps = door.x < prop.rect.x + prop.rect.w && prop.rect.x < door.x + door.w
+        && door.y < prop.rect.y + prop.rect.h && prop.rect.y < door.y + door.h;
+      expect(overlaps, `${prop.id} blocks the cafe door`).toBe(false);
+    }
+  });
+
+  it('keeps the cafe lane clear of furniture, so the room can be walked end to end', () => {
+    const cafe = ISO_ZONES.find(zone => zone.id === 'cafe')!;
+    const aisle = cafe.aisle!;
+    for (const prop of ISO_PROPS) {
+      if (prop.zone !== 'cafe' || prop.height <= 0) continue;
+      const nearestX = Math.max(prop.rect.x - aisle.x, 0, aisle.x - (prop.rect.x + prop.rect.w));
+      const nearestY = Math.max(prop.rect.y - aisle.y, 0, aisle.y - (prop.rect.y + prop.rect.h));
+      expect(Math.hypot(nearestX, nearestY), `${prop.id} stands in the lane`).toBeGreaterThan(0.3);
     }
   });
 

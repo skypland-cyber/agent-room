@@ -16,6 +16,7 @@ import { PAIR_LINES, chatTurn, lineIndex, restSeed, restTogether, soloPoolFor } 
 import { t } from '../../../i18n/index.js';
 import {
   ANALYSIS_DESKS,
+  BREAK_SPOTS,
   CEO_WAIT_SPOTS,
   CONTROL_DESK,
   DEV_DESKS,
@@ -263,15 +264,16 @@ export function planIso(
       };
     }
 
-    // 6. Idle: on a break. It drifts one stop along the sofas and the counter every
-    //    ~18 seconds, so the room is alive without anyone pretending to work.
+    // 6. Idle: on a break. It moves one place along the lounge's sofas and the
+    //    cafe's bar every ~26 seconds — the walk between them is part of the
+    //    picture, so nobody is ever teleported to a coffee.
     const rotation = restIndex;
     restIndex += 1;
-    const phase = Math.floor(now / 18_000) + restSeed(agent.id) + rotation;
-    const spot = LOUNGE_SPOTS[Math.abs(phase) % LOUNGE_SPOTS.length]!;
+    const phase = Math.floor(now / 26_000) + restSeed(agent.id) + rotation;
+    const spot = BREAK_SPOTS[Math.abs(phase) % BREAK_SPOTS.length]!;
     return {
       agentId: agent.id,
-      zone: 'lounge',
+      zone: spot.area === 'lounge' ? 'lounge' : 'cafe',
       pose: spot.pose,
       spot: { x: spot.x, y: spot.y },
       facing: spot.facing,
@@ -322,7 +324,7 @@ export function attachIsoChat(scenes: IsoAgentScene[], nowMs: number): IsoAgentS
     const seed = restSeed(scene.agentId);
     const turn = chatTurn(seed, nowMs);
     if (!turn.speaking) continue;
-    const area = scene.zone === 'lounge' && scene.pose === 'coffee' ? 'pantry' : 'lounge';
+    const area = scene.zone === 'cafe' || scene.pose === 'coffee' ? 'pantry' : 'lounge';
     const pool = soloPoolFor(area);
     scene.bubble = t(pool[lineIndex(seed, turn.cycle, pool.length)]!);
     scene.bubbleTone = 'good';
@@ -381,6 +383,7 @@ const EMPTY_FACTS: Record<IsoZoneId | 'plaza', ZoneFact> = {
   meeting: { value: 0, tone: 'muted' },
   archive: { value: 0, tone: 'muted' },
   lounge: { value: 0, tone: 'muted' },
+  cafe: { value: 0, tone: 'muted' },
   plaza: { value: 0, tone: 'muted' },
 };
 
@@ -406,6 +409,7 @@ export function isoZoneFacts(overview: OfficeOverview, scenes: IsoAgentScene[]):
     },
     archive: { value: overview.counts.archivedMeetings, tone: 'muted' },
     lounge: { value: count('lounge'), tone: 'good' },
+    cafe: { value: count('cafe'), tone: count('cafe') > 0 ? 'good' : 'muted' },
     plaza: { value: 0, tone: 'muted' },
   };
 }

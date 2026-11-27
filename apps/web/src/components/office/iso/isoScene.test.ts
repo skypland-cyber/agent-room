@@ -126,16 +126,27 @@ describe('where each agent stands', () => {
     expect(scenes[0]!.bubbleTone).toBe('warn');
   });
 
-  it('keeps an idle agent in the lounge on a break, and a paused one quiet there', () => {
+  it('keeps an idle agent on a break in the lounge or the cafe, and a paused one quiet in the lounge', () => {
     const scenes = planIso([
       agent('ag_1', 'GPT', 'idle'),
       agent('ag_2', 'Gemini', 'paused'),
     ], overview());
-    expect(scenes[0]!.zone).toBe('lounge');
+    expect(['lounge', 'cafe']).toContain(scenes[0]!.zone);
     expect(scenes[0]!.rest).toBe(true);
     expect(scenes[1]!.zone).toBe('lounge');
     expect(scenes[1]!.rest).toBe(false);
     expect(scenes[1]!.bubble).toBe('일시정지');
+  });
+
+  it('sends the idle staff to both break rooms over the course of the day', () => {
+    const agents = Array.from({ length: 4 }, (_, index) => agent(`ag_${index}`, `Guest ${index}`, 'idle'));
+    const zones = new Set<string>();
+    for (let minute = 0; minute < 60; minute += 1) {
+      for (const scene of planIso(agents, overview(), { now: now + minute * 60_000 })) zones.add(scene.zone);
+    }
+    // The rotation is what makes the floor move: both break rooms get used.
+    expect(zones.has('lounge')).toBe(true);
+    expect(zones.has('cafe')).toBe(true);
   });
 
   it('keeps an offline agent at a desk, faded, instead of leaving the room empty', () => {
