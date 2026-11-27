@@ -138,13 +138,29 @@ export class FakeNotion {
     dataSource.properties.set(to, property);
   }
 
-  /** Seed one row (so a query has something to return). */
-  insertRow(dataSourceId: string, properties: Record<string, unknown> = {}): void {
-    const rows = this.rows.get(dataSourceId) ?? [];
+  /** Seed one row (so a query has something to return). Returns its page id. */
+  insertRow(dataSourceId: string, properties: Record<string, unknown> = {}): string {
     const dataSource = this.dataSources.get(dataSourceId);
-    // Notion keys a page's properties by name and stamps each value with the
-    // property's id and type; the office reads through the id. A fake that
-    // omitted them would let a name-based read pass here and fail in Notion.
+    const id = `page_${this.nextId++}`;
+    this.rows.set(dataSourceId, [
+      ...(this.rows.get(dataSourceId) ?? []),
+      this.rowPage(id, dataSourceId, properties, dataSource),
+    ]);
+    return id;
+  }
+
+  /**
+   * What Notion answers for a row: properties keyed by **name**, each value
+   * stamped with the property's id and type. The office reads through the id, so
+   * a fake that omitted them would let a name-based implementation pass here and
+   * fail in the workspace.
+   */
+  private rowPage(
+    id: string,
+    dataSourceId: string,
+    properties: Record<string, unknown>,
+    dataSource: FakeDataSource | undefined,
+  ): Record<string, unknown> {
     const normalized: Record<string, unknown> = {};
     for (const [name, value] of Object.entries(properties)) {
       const property = dataSource?.properties.get(name);
@@ -157,9 +173,21 @@ export class FakeNotion {
       }
       normalized[name] = entry;
     }
-    const id = `page_${this.nextId++}`;
-    rows.push({ object: 'page', id, url: `https://app.notion.com/p/${id}`, properties: normalized });
-    this.rows.set(dataSourceId, rows);
+    const now = new Date().toISOString();
+    return {
+      object: 'page',
+      id,
+      url: `https://app.notion.com/p/${id}`,
+      created_time: now,
+      last_edited_time: now,
+      properties: normalized,
+      parent: { type: 'data_source_id', data_source_id: dataSourceId },
+    };
+  }
+
+  /** The row a page id names, for assertions about what a write actually stored. */
+  rowProperties(pageId: string): Record<string, unknown> | undefined {
+    return this.findRowPage(pageId)?.page.properties as Record<string, unknown> | undefined;
   }
 
   /** Seed a page body, for `GET /v1/pages/{id}/markdown`. */
@@ -232,6 +260,13 @@ export class FakeNotion {
           unknown_block_ids: [],
         },
       };
+    }
+
+    if (resource === 'pages' && method === 'POST' && rest.length === 0) {
+      return this.createPage(body);
+    }
+    if (resource === 'pages' && method === 'PATCH' && id && rest.length === 0) {
+      return this.updatePage(id, body);
     }
 
     if (resource === 'pages' && method === 'GET') {
@@ -316,6 +351,72 @@ export class FakeNotion {
     }
 
     return { status: 404, payload: errorBody(404, 'object_not_found', `Unhandled ${method} ${path}`) };
+  }
+
+  /** `POST /v1/pages` — a row inside one of the office's data sources. */
+  private createPage(body: Record<string, unknown> | undefined): { status: number; payload: unknown } {
+    if (!body) return { status: 400, payload: errorBody(400, 'validation_error', 'Body is required') };
+    const parent = body.parent as { type?: string; data_source_id?: string; database_id?: string } | undefined;
+    let dataSourceId = parent?.data_source_id;
+    if (!dataSourceId && parent?.database_id) {
+      // Notion also accepts the database id as a parent; the office uses the data
+      // source, but a fake that refused the older form would be wrong.
+      dataSourceId = this.databases.get(parent.database_id)?.dataSourceId;
+    }
+    const dataSource = dataSourceId ? this.dataSources.get(dataSourceId) : undefined;
+    if (!dataSource) {
+      return { status: 404, payload: errorBody(404, 'object_not_found', 'No data source for that parent') };
+    }
+    const properties = (body.properties ?? {}) as Record<string, unknown>;
+    const invalid = Object.keys(properties).find(name => !this.propertyNameFor(dataSource, name));
+    if (invalid) {
+      return {
+        status: 400,
+        payload: errorBody(400, 'validation_error', `Could not find property ${invalid} in data source ${dataSource.id}`),
+      };
+    }
+    const byName: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(properties)) {
+      const real = this.propertyNameFor(dataSource, name);
+      if (real) byName[real] = value;
+    }
+    const id = `page_${this.nextId++}`;
+    this.rows.set(dataSource.id, [
+      ...(this.rows.get(dataSource.id) ?? []),
+      this.rowPage(id, dataSource.id, byName, dataSource),
+    ]);
+    return { status: 200, payload: this.rowPage(id, dataSource.id, byName, dataSource) };
+  }
+
+  /** `PATCH /v1/pages/{id}` — replace the properties given, keep the rest. */
+  private updatePage(id: string, body: Record<string, unknown> | undefined): { status: number; payload: unknown } {
+    const found = this.findRowPage(id);
+    if (!found) return { status: 404, payload: errorBody(404, 'object_not_found', 'No page with that id') };
+    const dataSource = this.dataSources.get(found.dataSourceId);
+    if (!dataSource) return { status: 404, payload: errorBody(404, 'object_not_found', 'No data source') };
+    const properties = (body?.properties ?? {}) as Record<string, unknown>;
+    const invalid = Object.keys(properties).find(name => !this.propertyNameFor(dataSource, name));
+    if (invalid) {
+      return {
+        status: 400,
+        payload: errorBody(400, 'validation_error', `Could not find property ${invalid} in data source ${dataSource.id}`),
+      };
+    }
+    const current = (found.page.properties ?? {}) as Record<string, unknown>;
+    const next: Record<string, unknown> = { ...current };
+    for (const [name, value] of Object.entries(properties)) {
+      const real = this.propertyNameFor(dataSource, name);
+      const property = real ? dataSource.properties.get(real) : undefined;
+      if (!real || !property) continue;
+      next[real] = {
+        ...(value && typeof value === 'object' ? value as Record<string, unknown> : {}),
+        id: property.id,
+        type: property.type,
+      };
+    }
+    found.page.properties = next;
+    found.page.last_edited_time = new Date().toISOString();
+    return { status: 200, payload: found.page };
   }
 
   private findRowPage(id: string): { page: Record<string, unknown>; dataSourceId: string } | undefined {

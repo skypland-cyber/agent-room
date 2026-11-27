@@ -40,6 +40,7 @@ import { siteUrl } from './_siteUrl.js';
 import { signVaultToken } from './_fileAccess.js';
 import { handoffRoom } from './_officeHandoff.js';
 import { clearLoginFailures, loginGuardState, recordLoginFailure } from './_loginGuard.js';
+import { syncEvent } from './_notion/sync.js';
 import {
   clearSessionCookie,
   officeAuthState,
@@ -268,6 +269,9 @@ async function handleAgents(store: ReturnType<typeof officeStore>, action: strin
       ...normalized,
     }, 'owner', Date.now());
     await audit(store, OWNER, existing ? 'agent.update' : 'agent.create', { target: agent.id, detail: agent.name });
+    // The manual row mirrors the roster (role, tags, daily limit, brief, active);
+    // the fields a person writes by hand are never touched by this.
+    syncEvent(store, { kind: 'staff.mirror', agent });
     send(res, 200, { agent });
     return;
   }
@@ -286,6 +290,7 @@ async function handleAgents(store: ReturnType<typeof officeStore>, action: strin
     const paused = action === 'agents.pause';
     const agent = await office.upsertAgent(store, { ...existing, paused }, 'owner', Date.now());
     await audit(store, OWNER, paused ? 'agent.pause' : 'agent.resume', { target: agent.id, detail: agent.name });
+    syncEvent(store, { kind: 'staff.mirror', agent });
     send(res, 200, { agent });
     return;
   }
@@ -320,6 +325,7 @@ async function handleProjects(store: ReturnType<typeof officeStore>, action: str
         updatedAt: now,
       }));
       await audit(store, OWNER, 'project.update', { target: project.id, detail: project.name });
+      syncEvent(store, { kind: 'project.upsert', project });
       send(res, 200, { project });
       return;
     }
@@ -329,6 +335,7 @@ async function handleProjects(store: ReturnType<typeof officeStore>, action: str
       ...(input.roomCodes !== undefined ? { roomCodes: stringList(input.roomCodes) } : {}),
     }, 'owner', now);
     await audit(store, OWNER, 'project.create', { target: project.id, detail: project.name });
+    syncEvent(store, { kind: 'project.upsert', project });
     send(res, 200, { project });
     return;
   }
@@ -337,6 +344,9 @@ async function handleProjects(store: ReturnType<typeof officeStore>, action: str
     const removed = await office.deleteProject(store, id);
     if (!removed) throw new OfficeApiError('That project no longer exists.', 404, 'project_not_found');
     await audit(store, OWNER, 'project.delete', { target: id });
+    // The Notion row is kept and marked 보관 — the knowledge it points at must
+    // outlive the project (§6.5).
+    syncEvent(store, { kind: 'project.deleted', projectId: id });
     send(res, 200, { removed: true });
     return;
   }
@@ -347,6 +357,9 @@ async function handleProjects(store: ReturnType<typeof officeStore>, action: str
       const input = normalizeMemoryInput(body.memory ?? body);
       const { project, entry } = await office.addProjectMemory(store, projectId, input, 'owner', now2);
       await audit(store, OWNER, 'project.memory.add', { target: projectId, detail: entry.title });
+      // A memory entry is knowledge: the same text becomes a 지식 베이스 row, so
+      // the AI staff can find it through knowledge_search without a room.
+      syncEvent(store, { kind: 'memory.upsert', project, entry });
       send(res, 200, { project, entry });
       return;
     }
@@ -355,6 +368,8 @@ async function handleProjects(store: ReturnType<typeof officeStore>, action: str
       const input = normalizeMemoryInput(body.memory ?? body);
       const project = await office.updateProjectMemory(store, projectId, memoryId, input, 'owner', now2);
       await audit(store, OWNER, 'project.memory.update', { target: projectId, detail: memoryId });
+      const entry = project.memory.find(item => item.id === memoryId);
+      if (entry) syncEvent(store, { kind: 'memory.upsert', project, entry });
       send(res, 200, { project });
       return;
     }

@@ -39,6 +39,7 @@ import { createRemoteRoomClient, type RemoteRoomClient } from './_mcpRoomClient.
 import { blobStoreFailed, createBlobStore } from './_blobStore.js';
 import { siteUrl } from './_siteUrl.js';
 import { canDeleteFile } from './_fileAccess.js';
+import { syncEvent } from './_notion/sync.js';
 import {
   VaultRequestError,
   deleteVaultFileWithObjects,
@@ -225,6 +226,7 @@ export async function runVaultTool(
         });
         if (uploaded.files.length === 0) return fail(uploaded.failures[0]?.error ?? 'upload_failed', uploaded.failures[0]?.message ?? 'Upload failed.');
         const file = uploaded.files[0]!;
+        if (file.kind === 'deliverable') syncEvent(client.store, { kind: 'deliverable.upsert', file });
         return result({
           file: row(file),
           downloadUrl: vaultDownloadUrl(file),
@@ -265,6 +267,7 @@ export async function runVaultTool(
             ...(typeof args.taskId === 'string' ? { taskId: args.taskId } : {}),
             maxBytes: VAULT_MCP_INLINE_MAX_BYTES,
           });
+          if (revised.file.kind === 'deliverable') syncEvent(client.store, { kind: 'deliverable.upsert', file: revised.file });
           return result({
             file: row(revised.file),
             downloadUrl: vaultDownloadUrl(revised.file),
@@ -305,6 +308,9 @@ export async function runVaultTool(
       const blob = createBlobStore();
       if (blobStoreFailed(blob)) return fail('storage_unavailable', blob.message);
       await deleteVaultFileWithObjects({ store: client.store, blob: blob.store }, code, file.kind, file.id);
+      if (file.kind === 'deliverable') {
+        syncEvent(client.store, { kind: 'deliverable.deleted', fileId: file.id, roomCode: code, name: file.name });
+      }
       return result({ deleted: true, id: file.id, name: file.name });
     }
 
