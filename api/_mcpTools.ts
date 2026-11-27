@@ -37,9 +37,12 @@ import {
   soleAgentOf,
   AGENT_ROOM_ASYNC_LISTEN,
   AGENT_ROOM_CODEX_CONTINUE,
+  backoffDelayMs,
+  linkRecoveryNote,
+  linkRecoverySentence,
 } from '@agent-room/shared';
-import type { ClientKind, Message, Participant, Room, TaskBoard, Task, TaskInbox } from '@agent-room/shared';
-import { buildRoomRetro, isConfiguredModerator, recordAgentHeartbeat } from '@agent-room/upstash-client';
+import type { ClientKind, LinkRecoveryNote, Message, Participant, Room, TaskBoard, Task, TaskInbox } from '@agent-room/shared';
+import { appendAuditSafe, auditEntry, buildRoomRetro, isConfiguredModerator, recordAgentHeartbeat } from '@agent-room/upstash-client';
 import type { TaskBoard as RetroBoard } from '@agent-room/shared';
 import {
   appendMessage,
@@ -432,6 +435,15 @@ type ListenResult = {
   addressedYou?: boolean;
   yourTurn?: SpeakingTurn;
   hint: string;
+  /**
+   * Set when this call had to retry its way back to storage.
+   *
+   * A link that failed for six seconds and one that failed for six minutes look
+   * identical in `messages` — both simply return the next batch. This is the
+   * difference, stated so the agent can say what happened and pick its work back
+   * up instead of assuming the quiet was normal.
+   */
+  connection?: LinkRecoveryNote | { state: 'degraded'; downMs: number; retries: number };
 };
 
 type SpeakingTurn = NonNullable<Awaited<ReturnType<typeof getSpeakingTurn>>> & { do?: string };
@@ -562,6 +574,14 @@ async function runListenInner(
   let humanBroadcastsToMe = true;
   let turnMode = false;
   let lastTurnMessageCount = -1;
+  // Link recovery. The old behaviour retried a failed read after a flat two
+  // seconds, forever, and told nobody: a seat that spent a minute failing looked
+  // exactly like a seat sitting in a quiet room. Now the wait widens per attempt
+  // (so a store that is genuinely down is not hammered), the window's own
+  // deadline caps it, and the result says the link was down and for how long.
+  let linkAttempts = 0;
+  let linkDownSince: number | undefined;
+  let connection: ListenResult['connection'];
   while (Date.now() - start < cappedMs) {
     let turnCheckDue = false;
     try {
@@ -592,8 +612,18 @@ async function runListenInner(
     } catch { /* transient — keep listening */ }
     const listed = await listMessagesResilient(listMessages, client, code, since);
     if (!listed.ok) {
-      await new Promise(r => setTimeout(r, 2000));
+      linkAttempts += 1;
+      linkDownSince ??= Date.now();
+      const remaining = cappedMs - (Date.now() - start);
+      if (remaining <= 0) break;
+      const wait = Math.min(backoffDelayMs(linkAttempts - 1, { baseMs: 400, maxMs: 5_000 }), remaining);
+      await new Promise(r => setTimeout(r, Math.max(1, wait)));
       continue;
+    }
+    if (linkDownSince !== undefined) {
+      connection = linkRecoveryNote(Date.now() - linkDownSince, linkAttempts);
+      linkDownSince = undefined;
+      linkAttempts = 0;
     }
     const msgs = listed.messages.map(message => ({
       ...message,
@@ -631,26 +661,45 @@ async function runListenInner(
           cursor,
           ...(addressed ? { addressedYou: true } : {}),
           ...(yourTurn ? { yourTurn } : {}),
-          hint: `${msgs.length} new message(s). Reply with room_send if appropriate. ${NEXT_LISTEN(code, cursor)}`,
+          ...(connection ? { connection } : {}),
+          hint: [
+            connection ? linkRecoverySentence(connection) : '',
+            `${msgs.length} new message(s). Reply with room_send if appropriate. ${NEXT_LISTEN(code, cursor)}`,
+          ].filter(Boolean).join(' '),
         };
       }
       held = msgs;
     }
     await new Promise(r => setTimeout(r, 2000));
   }
+  if (linkDownSince !== undefined) {
+    // Still failing when the window closed: say so plainly rather than dressing
+    // an outage as a quiet room, and keep the retry instruction.
+    connection = { state: 'degraded', downMs: Date.now() - linkDownSince, retries: linkAttempts };
+  }
   if (held.length > 0) {
     const cursor = since + held.length;
     return {
       messages: held,
       cursor,
-      hint: `${held.length} message(s) arrived while you held, none addressed to you — here they are together. `
-        + `Read them, speak only if you have something to add. ${NEXT_LISTEN(code, cursor)}`,
+      ...(connection ? { connection } : {}),
+      hint: [
+        connection?.state === 'degraded'
+          ? `The link to storage is still failing (${connection.retries} retries). These are the messages read before it dropped — call room_listen again; the retry is automatic.`
+          : '',
+        connection ? linkRecoverySentence(connection) : '',
+        `${held.length} message(s) arrived while you held, none addressed to you — here they are together. `
+          + `Read them, speak only if you have something to add. ${NEXT_LISTEN(code, cursor)}`,
+      ].filter(Boolean).join(' '),
     };
   }
   return {
     messages: [],
     cursor: since,
-    hint: `Quiet for ${cappedMs}ms — normal; quiet ≠ done. ${NEXT_LISTEN(code, since)}`,
+    ...(connection ? { connection } : {}),
+    hint: connection
+      ? `${linkRecoverySentence(connection)} ${NEXT_LISTEN(code, since)}`
+      : `Quiet for ${cappedMs}ms — normal; quiet ≠ done. ${NEXT_LISTEN(code, since)}`,
   };
 }
 
@@ -1375,9 +1424,14 @@ async function dispatch(
         ...joinOptions,
       });
       const finalName = updated.participant.name;
-      // Office presence: a join is the first heartbeat of a session.
-      void recordAgentHeartbeat(client.store, { name: finalName, roomCode: a.code, at: Date.now() })
-        .catch(() => ({ recorded: false }));
+      // Office presence: a join is the first heartbeat of a session. Awaited
+      // here (not fire-and-forget as on the listen path) because the answer is
+      // what tells a returning seat it was away and what it left unfinished.
+      const link = await recordAgentHeartbeat(client.store, { name: finalName, roomCode: a.code, at: Date.now() })
+        .catch(() => ({ recorded: false } as { recorded: boolean; reconnected?: boolean; gapMs?: number }));
+      const reconnect = link.reconnected && link.gapMs !== undefined
+        ? { state: 'reconnected' as const, downMs: link.gapMs }
+        : null;
       const myEntry = updated.participants.find(p => p.name === finalName && p.client === 'cc');
       const muted = myEntry?.canSpeak === false;
       if (!reconnecting && !muted) {
@@ -1397,6 +1451,19 @@ async function dispatch(
         updated,
         isConfiguredModerator(updated, finalName, 'cc'),
       );
+      if (reconnect) {
+        // Recorded after the inbox is read, so the audit line names the work
+        // that is waiting. Best-effort: a failed audit never fails a join.
+        void appendAuditSafe(client.store, [auditEntry(
+          { name: finalName, kind: 'agent' },
+          'agent.link.recovered',
+          {
+            at: Date.now(),
+            roomCode: a.code,
+            detail: `away ${Math.round(reconnect.downMs / 1000)}s; resume ${[...(joinInbox.toRecover ?? []), ...joinInbox.current].join(', ') || 'nothing'}`,
+          },
+        )]).catch(() => undefined);
+      }
       return ok({
         code: a.code,
         topic: updated.topic,
@@ -1420,6 +1487,11 @@ async function dispatch(
         recentMessages,
         ...contextFields(msgs),
         ...(joinInbox.hint ? { yourTasks: joinInbox } : {}),
+        // A seat that was away is told so, with the ids it left open. The board
+        // never lost them — this is the moment it is worth pointing at them.
+        ...(reconnect
+          ? { connection: { ...reconnect, tasks: [...(joinInbox.toRecover ?? []), ...joinInbox.current] } }
+          : {}),
         roleBrief: roleBriefFor(a.role ?? ''),
         roomPolicy: policyFor(updated, finalName),
         policyVersion: ROOM_POLICY_VERSION,
@@ -1431,6 +1503,9 @@ async function dispatch(
           // reintroducing itself under its decorated name on the next join.
           a.name !== seatName
             ? `The office roster seats you as "${seatName}"; use that name for room_join, room_send and room_listen so the boss's assignments and your heartbeat reach you.`
+            : '',
+          reconnect
+            ? `You were away for ${Math.round(reconnect.downMs / 1000)}s and are back — nothing was lost.`
             : '',
           joinInbox.hint,
           // Board work outranks presence: an agent told to listen right after
@@ -1619,6 +1694,7 @@ async function dispatch(
         ...(yourTurn ? { yourTurn } : {}),
         ...digestFields,
         ...listenStatusFields(result.terminated),
+        ...(result.connection ? { connection: result.connection } : {}),
         ...(result.addressedYou ? { addressedYou: true } : {}),
         ...(result.terminated ? { terminated: result.terminated } : {}),
         ...(!result.terminated
@@ -1632,6 +1708,11 @@ async function dispatch(
         // Moderator is now also needed for wakeOn, which is why the flag is
         // computed on quiet holds too — but a quiet hold stays lean.
         hint: [
+          // A recovered link is said even when board work overrides the presence
+          // half of the hint: "your board work is waiting" and "your link was
+          // down for two minutes" are different facts, and an agent that lost
+          // the connection needs both.
+          result.connection ? linkRecoverySentence(result.connection) : '',
           yourTurn?.do,
           isModerator && result.messages.length > 0
             ? "You are this room's Moderator — follow roomPolicy: assign the work by name and synthesize, do not do it yourself."

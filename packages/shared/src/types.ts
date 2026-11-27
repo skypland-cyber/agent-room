@@ -145,7 +145,8 @@ export type SystemEventType =
   | 'moderator_handoff'  // moderator timed out / left — floor handed to a deputy
   | 'task_update'        // evidence-gated task board changed state
   | 'project_prompt_updated' // host set/cleared the room's project prompt
-  | 'file_update';      // a vault file was added, revised or linked to work
+  | 'file_update'        // a vault file was added, revised or linked to work
+  | 'handoff';           // a room's open work was carried into a successor room
 
 // Default per-role timeout values (in ms). Used when a room hasn't been
 // configured with custom overrides. Agent turns can involve real code edits,

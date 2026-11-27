@@ -15,6 +15,7 @@ import { OfficeProjectsPanel } from './OfficeProjectsPanel.js';
 import { OfficeWorkPanel } from './OfficeWorkPanel.js';
 import { OfficeAutomationPanel } from './OfficeAutomationPanel.js';
 import { OfficeSettingsPanel } from './OfficeSettingsPanel.js';
+import { OfficeArchivePanel } from './OfficeArchivePanel.js';
 import { OfficeTodayCard, UsageGauge } from './OfficeTodayCard.js';
 
 const now = 1_800_000_000_000;
@@ -215,5 +216,46 @@ describe('office screens render', () => {
     expect(limits).toContain('사용량과 한도');
     expect(limits).toContain('백업 내려받기');
     expect(limits).toContain('복구');
+    // The restore is guarded: a preview first, and the snapshot it leaves behind.
+    expect(limits).toContain('미리보기');
+    expect(limits).toContain('자동 스냅샷');
+    expect(limits).toContain('스냅샷');
+  });
+
+  it('offers a handoff on an expiring room and shows both ends of one', () => {
+    const html = renderToStaticMarkup(<OfficeWorkPanel overview={overview} onChanged={() => undefined} />);
+    // The D-2 room offers the handoff; the button is the only place it starts.
+    expect(html).toContain('승계');
+    expect(html).toContain('미완료 업무·프로젝트 기억·결과물 목록이 새 방으로 복사됩니다');
+
+    const handed = {
+      ...overview,
+      rooms: [
+        { ...overview.rooms[1]!, successorRoomCode: 'NEW-RM-234' },
+        { ...overview.rooms[0]!, predecessorRoomCode: 'OLD-RM-999' },
+      ],
+    } as unknown as typeof overview;
+    const after = renderToStaticMarkup(<OfficeWorkPanel overview={handed} onChanged={() => undefined} />);
+    expect(after).toContain('승계 → NEW-RM-234');
+    expect(after).toContain('OLD-RM-999 이어받음');
+  });
+
+  it('renders the permanent deliverables vault and the seat link state', () => {
+    const archive = renderToStaticMarkup(<OfficeArchivePanel onChanged={() => undefined} />);
+    expect(archive).toContain('결과물 보관함');
+    expect(archive).toContain('회의록 보관함');
+    expect(archive).toContain('작업 기록');
+
+    const quiet = [{
+      ...agents[0]!,
+      presence: {
+        ...agents[0]!.presence,
+        link: { state: 'recovering' as const, label: 'No answer', lastHealthyAt: now - 5 * 60_000, downForMs: 5 * 60_000, reconnects: 2 },
+      },
+    }];
+    const staff = renderToStaticMarkup(<OfficeStaffPanel agents={quiet} onChanged={() => undefined} />);
+    expect(staff).toContain('연결 끊김 의심 · 업무 보류');
+    expect(staff).toContain('복구 2회');
+    expect(staff).toContain('마지막 정상 연결');
   });
 });

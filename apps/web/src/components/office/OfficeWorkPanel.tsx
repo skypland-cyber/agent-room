@@ -4,7 +4,7 @@
 // is one nobody can audit later.
 import { useState } from 'react';
 import type { OfficeOverview, OfficeTaskRef } from '@agent-room/shared';
-import { abortTask, approveTask, archiveRoomNow, deleteRoom, endRoom, pauseTask, rejectTask, requestApproval, resumeTask, retryTask } from '../../lib/officeApi.js';
+import { abortTask, approveTask, archiveRoomNow, deleteRoom, endRoom, handoffRoom, pauseTask, rejectTask, requestApproval, resumeTask, retryTask } from '../../lib/officeApi.js';
 import { Badge, Button, Card, Empty, ErrorNote, Input, SectionTitle, formatDate, useOfficeAction } from './ui.js';
 import { useI18n } from '../../i18n/index.js';
 import { qaStatusLabel, roomStatusLabel, taskStateLabel } from '../../i18n/labels.js';
@@ -109,6 +109,8 @@ function TaskRow({ task, onChanged, run, busy }: {
 export function OfficeWorkPanel({ overview, onChanged }: Props) {
   const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
+  /** The last handoff's outcome, shown once under the rooms list. */
+  const [handoff, setHandoff] = useState<{ ok: string; skipped: string[] } | null>(null);
   const { busy, error, run } = useOfficeAction(onChanged);
   const running = overview.openTasks.filter(task => task.state !== 'pending_approval');
   const visible = showAll ? running : running.slice(0, 12);
@@ -185,11 +187,40 @@ export function OfficeWorkPanel({ overview, onChanged }: Props) {
                             ? t('work.room.dday', { days: room.daysLeft })
                             : t('work.room.expired')}
                         </Badge>
+                        {room.successorRoomCode ? (
+                          <a href={`/r/${room.successorRoomCode}`} title={t('work.room.handedOffTitle')}>
+                            <Badge tone="info">{t('work.room.handedOff', { code: room.successorRoomCode })}</Badge>
+                          </a>
+                        ) : null}
+                        {room.predecessorRoomCode ? (
+                          <a href={`/r/${room.predecessorRoomCode}`} title={t('work.room.predecessorTitle')}>
+                            <Badge tone="neutral">{t('work.room.predecessor', { code: room.predecessorRoomCode })}</Badge>
+                          </a>
+                        ) : null}
                         <Button variant="quiet" title={t('work.room.archiveTitle')}
                           disabled={busy !== null}
                           onClick={() => void run(`archive-${room.code}`, () => archiveRoomNow(room.code))}>
                           {t('work.room.archive')}
                         </Button>
+                        {live && !room.successorRoomCode ? (
+                          <Button
+                            variant={room.handoffDue ? 'primary' : 'ghost'}
+                            title={`${t('work.room.handoffTitle')} — ${t('work.room.handoffNote')}`}
+                            disabled={busy !== null}
+                            onClick={() => {
+                              if (!window.confirm(t('work.room.handoffConfirm', { code: room.code }))) return;
+                              void run(`handoff-${room.code}`, async () => {
+                                const result = await handoffRoom(room.code);
+                                setHandoff({
+                                  ok: t('work.room.handoffDone', { code: result.successorCode }),
+                                  skipped: result.skipped,
+                                });
+                                return result;
+                              });
+                            }}>
+                            {t('work.room.handoff')}
+                          </Button>
+                        ) : null}
                         <a href="/new" title={t('work.room.newTitle')}
                           className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-transparent bg-surface-sunken px-3 py-2 text-xs font-semibold text-ink-muted transition hover:text-ink">
                           {t('work.room.new')}
@@ -223,6 +254,14 @@ export function OfficeWorkPanel({ overview, onChanged }: Props) {
                 })}
               </ul>
             )}
+            {handoff ? (
+              <p className="mt-2 text-[11px] leading-relaxed text-ink-soft">
+                <span className="font-semibold text-emerald-700">{handoff.ok}</span>
+                {handoff.skipped.length > 0
+                  ? ` ${t('work.room.handoffSkipped', { list: handoff.skipped.join('; ') })}`
+                  : ''}
+              </p>
+            ) : null}
           </Card>
         </div>
       </div>

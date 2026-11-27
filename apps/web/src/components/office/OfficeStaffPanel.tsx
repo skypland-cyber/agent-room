@@ -9,7 +9,7 @@ import type { OfficeAgent, OfficeAgentView } from '@agent-room/shared';
 import { deleteAgent, pauseAgent, saveAgent } from '../../lib/officeApi.js';
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, SectionTitle, TextArea, timeAgo, useOfficeAction } from './ui.js';
 import { useI18n } from '../../i18n/index.js';
-import { presenceLabel } from '../../i18n/labels.js';
+import { linkStateLabel, presenceLabel } from '../../i18n/labels.js';
 
 interface Props {
   agents: OfficeAgentView[];
@@ -79,6 +79,17 @@ export function OfficeStaffPanel({ agents, onChanged }: Props) {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-semibold text-ink">{agent.name}</span>
                     <Badge tone={STATUS_TONE[agent.presence.status] ?? 'neutral'}>{presenceLabel(agent.presence, agent.enabled)}</Badge>
+                    {/* Presence only gives up at ten minutes; a seat that went
+                        quiet mid-task is the case somebody has to act on before
+                        then, so the link state sits beside it. */}
+                    {agent.presence.link && ['grace', 'recovering'].includes(agent.presence.link.state) ? (
+                      <Badge tone={agent.presence.link.state === 'recovering' ? 'bad' : 'warn'}>
+                        {linkStateLabel(agent.presence.link.state)}
+                      </Badge>
+                    ) : null}
+                    {agent.presence.link?.reconnects ? (
+                      <Badge tone="neutral">{t('staff.link.reconnects', { count: agent.presence.link.reconnects })}</Badge>
+                    ) : null}
                     {agent.requiresApproval ? <Badge tone="warn">{t('staff.badge.approval')}</Badge> : null}
                     {!agent.enabled ? <Badge tone="bad">{t('staff.badge.disabled')}</Badge> : null}
                   </div>
@@ -87,6 +98,9 @@ export function OfficeStaffPanel({ agents, onChanged }: Props) {
                     {agent.tags.length ? t('staff.meta.tags', { tags: agent.tags.join(', ') }) : ''}
                     {t('staff.meta.today', { used: agent.tasksToday, limit: agent.dailyTaskLimit })}
                     {t('staff.meta.heartbeat', { time: timeAgo(agent.presence.heartbeatAgeMs !== undefined ? Date.now() - agent.presence.heartbeatAgeMs : agent.lastHeartbeatAt) })}
+                    {agent.presence.link?.lastHealthyAt
+                      ? t('staff.meta.link', { time: timeAgo(agent.presence.link.lastHealthyAt) })
+                      : ''}
                     {agent.presence.roomCode ? t('staff.meta.room', { code: agent.presence.roomCode }) : ''}
                   </p>
                 </div>
