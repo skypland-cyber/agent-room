@@ -169,7 +169,9 @@ export type NotionErrorCode =
   | 'notion_unavailable'
   | 'notion_not_found'
   | 'notion_invalid_request'
-  | 'notion_call_budget';
+  | 'notion_call_budget'
+  /** The cached schema does not match the live database (a renamed property). */
+  | 'notion_schema_drift';
 
 /**
  * One error type for the whole Notion surface.
@@ -280,6 +282,19 @@ export interface NotionPage {
   archived?: boolean;
   url?: string;
   properties?: Record<string, unknown>;
+  /** Where the page lives — a row names the data source it belongs to. */
+  parent?: { type?: string; database_id?: string; data_source_id?: string; page_id?: string };
+  last_edited_time?: string;
+  created_time?: string;
+}
+
+/** `GET /v1/pages/{id}/markdown` — a page's body as Markdown. */
+export interface NotionPageMarkdown {
+  object?: string;
+  id?: string;
+  markdown?: string;
+  truncated?: boolean;
+  unknown_block_ids?: string[];
 }
 
 export interface NotionRichTextItem {
@@ -375,6 +390,8 @@ export interface NotionClient {
   readonly apiVersion: string;
   request<T extends object>(req: NotionRequest): Promise<T>;
   retrievePage(id: string): Promise<NotionPage>;
+  /** The page body as Markdown (v2). Falls back to properties in `search.ts`. */
+  retrievePageMarkdown(id: string): Promise<NotionPageMarkdown>;
   listBlockChildren(id: string, pageSize?: number): Promise<NotionBlockList>;
   appendBlockChildren(id: string, children: Array<Record<string, unknown>>): Promise<NotionBlockList>;
   createDatabase(body: Record<string, unknown>): Promise<NotionDatabase>;
@@ -514,6 +531,13 @@ export function createNotionClient(options: NotionClientOptions = {}): NotionCli
     request,
     async retrievePage(id) {
       return request<NotionPage>({ path: `pages/${encodeURIComponent(id)}`, method: 'GET' });
+    },
+    async retrievePageMarkdown(id) {
+      return request<NotionPageMarkdown>({
+        path: `pages/${encodeURIComponent(id)}/markdown`,
+        method: 'GET',
+        query: { markdown_version: 'v2' },
+      });
     },
     async listBlockChildren(id, pageSize = 100) {
       return request<NotionBlockList>({

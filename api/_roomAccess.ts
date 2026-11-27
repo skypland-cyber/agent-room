@@ -27,6 +27,13 @@ export interface McpGrant {
   create?: boolean;
   profile?: 'core' | 'full';
   requestsPerMinute?: number;
+  /**
+   * Notion knowledge access (§8.1). Absent means the knowledge tools are not
+   * even listed — a token that was never given the knowledge base should not
+   * see a tool it cannot use. `read` is enough for `knowledge_search` and
+   * `knowledge_get`; `write` additionally allows Phase 4's `knowledge_save`.
+   */
+  knowledge?: 'read' | 'write';
 }
 
 export function authenticateMcp(header: unknown, config: string | undefined) {
@@ -42,6 +49,7 @@ export function authenticateMcp(header: unknown, config: string | undefined) {
       grant.rooms.some(code => typeof code !== 'string' || !isValidCode(code)))) ||
       (grant.create !== undefined && (grant.create !== true && grant.create !== false || grant.create && grant.rooms !== '*')) ||
       (grant.profile !== undefined && grant.profile !== 'core' && grant.profile !== 'full') ||
+      (grant.knowledge !== undefined && grant.knowledge !== 'read' && grant.knowledge !== 'write') ||
       (grant.requestsPerMinute !== undefined && (!Number.isSafeInteger(grant.requestsPerMinute) ||
         grant.requestsPerMinute < 1 || grant.requestsPerMinute > 600))) {
     throw new Error('Invalid MCP grant.');

@@ -142,7 +142,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   // and leaves every unidentified client exactly as it was.
   const harnessFor = () => detectHarness(req.headers['user-agent'], server.getClientVersion()?.name);
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listTools(profile, harnessFor()).filter(tool => tool.name !== 'room_create' || grant.create) }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listTools(profile, harnessFor(), grant).filter(tool => tool.name !== 'room_create' || grant.create) }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     return callTool(roomClient, profile, name, (args ?? {}) as Record<string, unknown>, harnessFor(), grant);

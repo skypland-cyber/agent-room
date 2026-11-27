@@ -56,6 +56,12 @@ interface ScriptedResponse {
   body?: unknown;
   headers?: Record<string, string>;
   delayMs?: number;
+  /**
+   * Answer only a request whose path matches, leaving the queue in order for
+   * the others. Phase 2 needs "this page read succeeds, that body read 404s"
+   * and a plain FIFO queue cannot say that.
+   */
+  path?: RegExp;
 }
 
 type FakeInit = {
@@ -108,6 +114,11 @@ export class FakeNotion {
     this.queue.push(response);
   }
 
+  /** Queue a response for one path pattern, wherever it lands in the order. */
+  enqueueFor(path: RegExp, response: Omit<ScriptedResponse, 'path'>): void {
+    this.queue.push({ ...response, path });
+  }
+
   databaseByTitle(title: string): FakeDatabase | undefined {
     for (const database of this.databases.values()) if (database.title === title) return database;
     return undefined;
@@ -130,9 +141,33 @@ export class FakeNotion {
   /** Seed one row (so a query has something to return). */
   insertRow(dataSourceId: string, properties: Record<string, unknown> = {}): void {
     const rows = this.rows.get(dataSourceId) ?? [];
-    rows.push({ object: 'page', id: `page_${this.nextId++}`, properties });
+    const dataSource = this.dataSources.get(dataSourceId);
+    // Notion keys a page's properties by name and stamps each value with the
+    // property's id and type; the office reads through the id. A fake that
+    // omitted them would let a name-based read pass here and fail in Notion.
+    const normalized: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(properties)) {
+      const property = dataSource?.properties.get(name);
+      const entry = value && typeof value === 'object' && !Array.isArray(value)
+        ? { ...(value as Record<string, unknown>) }
+        : {};
+      if (property) {
+        entry.id = property.id;
+        entry.type = property.type;
+      }
+      normalized[name] = entry;
+    }
+    const id = `page_${this.nextId++}`;
+    rows.push({ object: 'page', id, url: `https://app.notion.com/p/${id}`, properties: normalized });
     this.rows.set(dataSourceId, rows);
   }
+
+  /** Seed a page body, for `GET /v1/pages/{id}/markdown`. */
+  setMarkdown(pageId: string, markdown: string): void {
+    this.markdown.set(pageId, markdown);
+  }
+
+  private readonly markdown = new Map<string, string>();
 
   created = (): FakeNotionCall[] => this.calls.filter(call => call.method === 'POST' && call.path === '/v1/databases');
 
@@ -151,7 +186,8 @@ export class FakeNotion {
       }
     }
 
-    const scripted = this.queue.shift();
+    const scriptedIndex = this.queue.findIndex(entry => !entry.path || entry.path.test(path));
+    const scripted = scriptedIndex >= 0 ? this.queue.splice(scriptedIndex, 1)[0] : undefined;
     if (scripted) {
       if (scripted.delayMs) await new Promise(resolve => setTimeout(resolve, scripted.delayMs));
       this.calls.push({ method, path, ...(body ? { body } : {}), status: scripted.status });
@@ -183,18 +219,44 @@ export class FakeNotion {
     if (parts[0] !== 'v1') return { status: 404, payload: errorBody(404, 'object_not_found', 'Not found') };
     const [, resource, id, ...rest] = parts;
 
+    if (resource === 'pages' && method === 'GET' && rest[0] === 'markdown') {
+      if (!id) return { status: 404, payload: errorBody(404, 'object_not_found', 'No page with that id') };
+      if (!this.pageExists(id)) return { status: 404, payload: errorBody(404, 'object_not_found', 'No page with that id') };
+      return {
+        status: 200,
+        payload: {
+          object: 'page_markdown',
+          id,
+          markdown: this.markdown.get(id) ?? '',
+          truncated: false,
+          unknown_block_ids: [],
+        },
+      };
+    }
+
     if (resource === 'pages' && method === 'GET') {
-      if (!id || id !== this.rootPageId) {
+      if (!id) return { status: 404, payload: errorBody(404, 'object_not_found', 'No page with that id') };
+      if (id === this.rootPageId) {
+        return {
+          status: 200,
+          payload: {
+            object: 'page',
+            id,
+            url: `https://app.notion.com/p/${id}`,
+            in_trash: false,
+            properties: {},
+          },
+        };
+      }
+      const row = this.findRowPage(id);
+      if (!row) {
         return { status: 404, payload: errorBody(404, 'object_not_found', 'No page with that id') };
       }
       return {
         status: 200,
         payload: {
-          object: 'page',
-          id,
-          url: `https://app.notion.com/p/${id}`,
-          in_trash: false,
-          properties: {},
+          ...row.page,
+          parent: { type: 'data_source_id', data_source_id: row.dataSourceId },
         },
       };
     }
@@ -254,6 +316,18 @@ export class FakeNotion {
     }
 
     return { status: 404, payload: errorBody(404, 'object_not_found', `Unhandled ${method} ${path}`) };
+  }
+
+  private findRowPage(id: string): { page: Record<string, unknown>; dataSourceId: string } | undefined {
+    for (const [dataSourceId, rows] of this.rows) {
+      const page = rows.find(row => row.id === id);
+      if (page) return { page, dataSourceId };
+    }
+    return undefined;
+  }
+
+  private pageExists(id: string): boolean {
+    return id === this.rootPageId || this.findRowPage(id) !== undefined;
   }
 
   private blockPayload(block: FakeBlock): Record<string, unknown> {
@@ -378,35 +452,145 @@ export class FakeNotion {
     return { status: 200, payload: this.dataSourcePayload(dataSource) };
   }
 
+  private propertyNameFor(dataSource: FakeDataSource, key: string): string | undefined {
+    if (dataSource.properties.has(key)) return key;
+    for (const [name, property] of dataSource.properties) if (property.id === key) return name;
+    return undefined;
+  }
+
+  /** The first property reference the filter names that the data source lacks. */
+  private unknownProperty(dataSource: FakeDataSource, node: unknown): string | null {
+    if (!node || typeof node !== 'object') return null;
+    const entry = node as Record<string, unknown>;
+    for (const group of ['and', 'or']) {
+      const children = entry[group];
+      if (Array.isArray(children)) {
+        for (const child of children) {
+          const bad = this.unknownProperty(dataSource, child);
+          if (bad) return bad;
+        }
+      }
+    }
+    if (typeof entry.property === 'string' && !this.propertyNameFor(dataSource, entry.property)) {
+      return entry.property;
+    }
+    return null;
+  }
+
+  private rowText(value: unknown): string {
+    const entry = (value ?? {}) as Record<string, unknown>;
+    const items = Array.isArray(entry.title) ? entry.title : Array.isArray(entry.rich_text) ? entry.rich_text : [];
+    return (items as Array<Record<string, unknown>>)
+      .map(item => String(item.plain_text ?? (item.text as Record<string, unknown> | undefined)?.content ?? ''))
+      .join('');
+  }
+
+  private matchesRow(dataSource: FakeDataSource, row: Record<string, unknown>, node: unknown): boolean {
+    if (!node || typeof node !== 'object') return true;
+    const entry = node as Record<string, unknown>;
+    if (Array.isArray(entry.and)) return entry.and.every(child => this.matchesRow(dataSource, row, child));
+    if (Array.isArray(entry.or)) return entry.or.some(child => this.matchesRow(dataSource, row, child));
+    const propertyName = typeof entry.property === 'string'
+      ? this.propertyNameFor(dataSource, entry.property)
+      : undefined;
+    if (!propertyName) return true;
+    const properties = (row.properties ?? {}) as Record<string, Record<string, unknown>>;
+    const value = properties[propertyName] ?? {};
+    /** The filter's own condition for one type — never the row's value. */
+    const condition = (type: string): Record<string, unknown> => {
+      const part = entry[type];
+      return part && typeof part === 'object' ? part as Record<string, unknown> : {};
+    };
+    const contains = (haystack: string, needle: unknown): boolean =>
+      typeof needle === 'string' && needle !== '' && haystack.toLowerCase().includes(needle.toLowerCase());
+
+    for (const type of ['title', 'rich_text']) {
+      if (entry[type]) {
+        const text = this.rowText(value);
+        const wanted = condition(type);
+        if (typeof wanted.contains === 'string') return contains(text, wanted.contains);
+        if (typeof wanted.equals === 'string') return text === wanted.equals;
+        if (wanted.is_empty === true) return text.trim() === '';
+        return true;
+      }
+    }
+    if (entry.select) {
+      const name = (value.select as { name?: string } | undefined)?.name;
+      const wanted = (entry.select as { equals?: string }).equals;
+      return wanted === undefined ? true : name === wanted;
+    }
+    if (entry.multi_select) {
+      const wanted = (entry.multi_select as { contains?: string }).contains;
+      const names = ((value.multi_select ?? []) as Array<{ name?: string }>).map(option => option.name ?? '');
+      return wanted === undefined ? true : names.some(name => name.toLowerCase() === wanted.toLowerCase());
+    }
+    if (entry.date) {
+      const start = ((value.date as { start?: string } | undefined)?.start) ?? '';
+      const condition_ = entry.date as { on_or_after?: string; before?: string; equals?: string };
+      if (typeof condition_.on_or_after === 'string') return start >= condition_.on_or_after;
+      if (typeof condition_.before === 'string') return start < condition_.before;
+      if (typeof condition_.equals === 'string') return start.slice(0, 10) === condition_.equals;
+      return true;
+    }
+    if (entry.checkbox) {
+      return (value.checkbox === true) === (entry.checkbox as { equals?: boolean }).equals;
+    }
+    if (entry.number) {
+      const wanted = (entry.number as { equals?: number }).equals;
+      return wanted === undefined ? true : value.number === wanted;
+    }
+    return true;
+  }
+
+  private sortValue(row: Record<string, unknown>, propertyName: string): string | number {
+    const properties = (row.properties ?? {}) as Record<string, Record<string, unknown>>;
+    const value = properties[propertyName] ?? {};
+    const date = (value.date as { start?: string } | undefined)?.start;
+    if (typeof date === 'string') return Date.parse(date) || 0;
+    const number = value.number;
+    if (typeof number === 'number') return number;
+    return this.rowText(value);
+  }
+
   private queryDataSource(
     id: string,
     body: Record<string, unknown> | undefined,
   ): { status: number; payload: unknown } {
     const dataSource = this.dataSources.get(id);
     if (!dataSource) return { status: 404, payload: errorBody(404, 'object_not_found', 'No data source') };
-    const filter = body?.filter as { property?: string } | undefined;
-    if (filter?.property) {
-      const known = dataSource.properties.has(filter.property)
-        || [...dataSource.properties.values()].some(property => property.id === filter.property);
-      if (!known) {
-        return {
-          status: 400,
-          payload: errorBody(
-            400,
-            'validation_error',
-            `Could not find property ${filter.property} in data source ${id}`,
-          ),
-        };
-      }
+    const unknown = this.unknownProperty(dataSource, body?.filter);
+    if (unknown) {
+      return {
+        status: 400,
+        payload: errorBody(
+          400,
+          'validation_error',
+          `Could not find property ${unknown} in data source ${id}`,
+        ),
+      };
     }
-    const all = this.rows.get(id) ?? [];
+    const all = (this.rows.get(id) ?? []).filter(row => this.matchesRow(dataSource, row, body?.filter));
+    const sorts = Array.isArray(body?.sorts) ? body!.sorts as Array<{ property?: string; direction?: string }> : [];
+    const sorted = sorts.length === 0 ? all : [...all].sort((left, right) => {
+      for (const sort of sorts) {
+        const propertyName = sort.property ? this.propertyNameFor(dataSource, sort.property) : undefined;
+        if (!propertyName) continue;
+        const a = this.sortValue(left, propertyName);
+        const b = this.sortValue(right, propertyName);
+        if (a === b) continue;
+        const order = a > b ? 1 : -1;
+        return sort.direction === 'ascending' ? order : -order;
+      }
+      return 0;
+    });
     const pageSize = typeof body?.page_size === 'number' ? body.page_size as number : 100;
+    const limit = Math.max(0, Math.min(100, pageSize));
     return {
       status: 200,
       payload: {
         object: 'list',
-        results: all.slice(0, Math.max(0, Math.min(100, pageSize))),
-        has_more: all.length > pageSize,
+        results: sorted.slice(0, limit),
+        has_more: sorted.length > limit,
         next_cursor: null,
       },
     };
