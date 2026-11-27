@@ -129,6 +129,12 @@ export const getArchive = (id: string) => request<{ archive: OfficeArchive }>('a
 export const captureArchive = (code: string) =>
   request<{ id: string; roomCode: string; topic: string; messageCount: number }>('archives.capture', { code });
 export const archiveRoomNow = captureArchive;
+/** Close a room nobody can host any more: minutes archived, room marked ended. */
+export const endRoom = (code: string) =>
+  request<{ room: { code: string; status: string; endedAt?: number } }>('rooms.end', { code });
+/** Remove a junk room and its data outright — no archive is kept. */
+export const deleteRoom = (code: string) =>
+  request<{ deleted: boolean; code: string }>('rooms.delete', { code });
 export const deleteArchive = (id: string) => request<{ removed: boolean }>('archives.delete', { id });
 
 export const listAudit = (filter: Record<string, unknown> = {}) =>

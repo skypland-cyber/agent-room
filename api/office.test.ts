@@ -2,6 +2,7 @@
 // Redis: locked while unconfigured, signed in with a cookie, and every action a
 // dashboard needs — staff, projects, approvals, archives, templates, backup.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ROOM_TTL_SECONDS } from '@agent-room/shared';
 import { installFakeRedis, type FakeRedis } from '../packages/upstash-client/test/fakeRedis.js';
 
 let fake: FakeRedis;
@@ -462,5 +463,91 @@ describe('routing', () => {
     await handler({ method: 'GET', headers: {}, query: { action: 'status' }, socket: {} } as never, res as never);
     expect(res.statusCode).toBe(200);
     expect(res.jsonBody.configured).toBe(true);
+  });
+});
+
+describe('today summary and room expiry', () => {
+  // The floor used to open on state only ("2 open tasks") and said nothing about
+  // the room's own 30-day life. Both are now read from boards the overview
+  // already walks, so these tests seed boards and check the arithmetic, not new
+  // reads.
+  const DAY = 86_400_000;
+
+  const seedRoom = async (code: string, createdAt: number, tasks: unknown[]) => {
+    const { createRoom, registerOfficeRoom } = await import('@agent-room/upstash-client');
+    const { createRemoteRoomClient } = await import('./_mcpRoomClient.js');
+    const client = createRemoteRoomClient(undefined);
+    await createRoom(client.store, { code, createdBy: 'Owner', topic: '오늘 요약', requireUnusedCode: true });
+    // Age the room without waiting 28 days: the record is the only place the
+    // lifetime is read from.
+    const stored = JSON.parse(String(await client.store.command(['GET', `room:${code}`])));
+    await client.store.command(['SET', `room:${code}`, JSON.stringify({ ...stored, createdAt })]);
+    await client.store.command(['SET', `task-board:${code}`, JSON.stringify({ code, version: 1, tasks })]);
+    // The dashboard finds rooms through its registry, not by scanning keys.
+    await registerOfficeRoom(client.store, code, { at: Date.now() });
+    return client.store;
+  };
+
+  const task = (id: string, state: string, extra: Record<string, unknown> = {}) => ({
+    id, title: `${id} title`, state, createdAt: Date.now(), updatedAt: Date.now(), ...extra,
+  });
+
+  it('counts what finished today, what is running and what waits on a person', async () => {
+    const cookie = await signIn();
+    const code = 'TDA-111-222';
+    const nowMs = Date.now();
+    await seedRoom(code, nowMs - 28 * DAY, [
+      task('T-01', 'done', { verdict: { verdict: 'done', by: 'Qwen', byClient: 'cc', at: nowMs } }),
+      // A ruling from yesterday (KST) is not today's work.
+      task('T-02', 'done', { verdict: { verdict: 'done', by: 'Qwen', byClient: 'cc', at: nowMs - DAY } }),
+      // A legacy done card with no verdict time must not inflate today.
+      task('T-03', 'done'),
+      task('T-04', 'in_progress'),
+      task('T-05', 'pending_approval', { approval: { required: true, by: 'owner', byClient: 'web', at: nowMs } }),
+      task('T-06', 'blocked'),
+      task('T-07', 'rejected'),
+    ]);
+
+    const overview = (await call('overview', {}, cookie)).jsonBody.overview;
+    expect(overview.todaySummary).toMatchObject({
+      doneToday: 1,
+      inProgress: 1,
+      needsAttention: 3,
+      expiringRooms: 1,
+      roomsScanned: 1,
+    });
+    expect(overview.todaySummary.day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('gives every room a lifetime and warns before it lapses', async () => {
+    const cookie = await signIn();
+    const code = 'EXP-333-444';
+    const createdAt = Date.now() - 28 * DAY;
+    await seedRoom(code, createdAt, []);
+
+    const overview = (await call('overview', {}, cookie)).jsonBody.overview;
+    const room = overview.rooms.find((row: { code: string }) => row.code === code);
+    expect(room.expiresAt).toBe(createdAt + ROOM_TTL_SECONDS * 1000);
+    expect(room.daysLeft).toBeGreaterThanOrEqual(1);
+    expect(room.daysLeft).toBeLessThanOrEqual(3);
+    expect(overview.warnings.some((warning: string) => new RegExp(`Room ${code} expires in \\d days?\\.`).test(warning))).toBe(true);
+
+    const listed = await call('rooms.list', {}, cookie);
+    const row = listed.jsonBody.rooms.find((entry: { code: string }) => entry.code === code);
+    expect(row.daysLeft).toBe(room.daysLeft);
+    expect(row.expiresAt).toBe(room.expiresAt);
+  });
+
+  it('leaves the summary out when the boards were not walked', async () => {
+    const cookie = await signIn();
+    await seedRoom('CHP-555-666', Date.now() - 29 * DAY, [task('T-09', 'in_progress')]);
+
+    const cheap = await call('overview', { withoutRooms: true }, cookie);
+    expect(cheap.statusCode).toBe(200);
+    expect(cheap.jsonBody.overview.todaySummary).toBeUndefined();
+    expect(cheap.jsonBody.overview.rooms).toEqual([]);
+
+    const full = await call('overview', {}, cookie);
+    expect(full.jsonBody.overview.todaySummary).toBeDefined();
   });
 });

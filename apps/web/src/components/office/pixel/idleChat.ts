@@ -5,8 +5,11 @@
 // stop along a ring of rest spots that runs from the pantry counter, past the
 // pantry table, up to the lobby sofas and the coffee table, and back. It also
 // holds the small talk — a line shows for a few seconds, the room goes quiet,
-// then someone says something again. Two agents resting within a few tiles pair
-// up and trade an ask and an answer instead of talking over each other.
+// then someone says something again. The lines are ordinary office chatter,
+// split between what anyone might say and what only makes sense by the pantry
+// or on a lobby sofa, and there are enough of them that a long break does not
+// turn into a loop. Two agents resting within a few tiles pair up and trade an
+// ask and an answer instead of talking over each other.
 //
 // Everything here is a pure function of the clock and a hash of the agent id:
 // the same minute always plans the same rest, a test can ask for any instant,
@@ -69,21 +72,158 @@ export const CHAT_SHOW_MS = 5_200;
 /** Who is close enough to be part of the same conversation, in tiles. */
 export const CHAT_RANGE = 3;
 
-/** Lines for someone resting on their own. */
+/**
+ * Lines anyone may say, wherever they are resting: the weather, the clock, the
+ * pile of mail. Thirty-four of them, so a staff member who sits in the pantry for
+ * ten minutes does not say the same thing twice.
+ */
 export const SOLO_LINES: MessageKey[] = [
   'pixel.chat.coffee',
   'pixel.chat.waiting',
   'pixel.chat.goodDay',
   'pixel.chat.stretch',
   'pixel.chat.snack',
+  'pixel.chat.solo.noRush',
+  'pixel.chat.solo.quiet',
+  'pixel.chat.solo.water',
+  'pixel.chat.solo.chair',
+  'pixel.chat.solo.blank',
+  'pixel.chat.solo.halfDay',
+  'pixel.chat.solo.oneMore',
+  'pixel.chat.solo.tuesday',
+  'pixel.chat.solo.login',
+  'pixel.chat.solo.email',
+  'pixel.chat.solo.meeting',
+  'pixel.chat.solo.break',
+  'pixel.chat.solo.sleepy',
+  'pixel.chat.solo.vacation',
+  'pixel.chat.solo.friday',
+  'pixel.chat.solo.machine',
+  'pixel.chat.solo.window',
+  'pixel.chat.solo.aircon',
+  'pixel.chat.solo.minutes',
+  'pixel.chat.solo.todo',
+  'pixel.chat.solo.copy',
+  'pixel.chat.solo.deadline',
+  'pixel.chat.solo.afterYou',
+  'pixel.chat.solo.surviving',
+  'pixel.chat.solo.almost',
+  'pixel.chat.solo.eyes',
+  'pixel.chat.solo.water2',
+  'pixel.chat.solo.bright',
+  'pixel.chat.solo.morning',
+  'pixel.chat.solo.focus',
+  'pixel.chat.solo.slowDay',
 ];
 
-/** A two-person exchange: the speaker asks, the other one answers on the next turn. */
+/**
+ * Lines that belong to the pantry counter and the snack table — lunch, coffee,
+ * who took the last cookie. Said only by someone resting there.
+ */
+export const PANTRY_LINES: MessageKey[] = [
+  'pixel.chat.pantry.lunch',
+  'pixel.chat.pantry.iced',
+  'pixel.chat.pantry.brew',
+  'pixel.chat.pantry.snackDrawer',
+  'pixel.chat.pantry.whoBrought',
+  'pixel.chat.pantry.whatCoffee',
+  'pixel.chat.pantry.diet',
+  'pixel.chat.pantry.together',
+  'pixel.chat.pantry.fridge',
+  'pixel.chat.pantry.cup',
+  'pixel.chat.pantry.cookie',
+  'pixel.chat.pantry.hungry',
+  'pixel.chat.pantry.warmHands',
+  'pixel.chat.pantry.waterFirst',
+  'pixel.chat.pantry.makeOne',
+  'pixel.chat.pantry.sweet',
+];
+
+/**
+ * Lines for the lobby sofas and the bench by the board — the afternoon slump,
+ * the weekend, how long the week feels. Said only by someone resting there.
+ */
+export const LOUNGE_LINES: MessageKey[] = [
+  'pixel.chat.lounge.leaveOnTime',
+  'pixel.chat.lounge.weekend',
+  'pixel.chat.lounge.threeHours',
+  'pixel.chat.lounge.monitor',
+  'pixel.chat.lounge.afternoon',
+  'pixel.chat.lounge.walk',
+  'pixel.chat.lounge.nap',
+  'pixel.chat.lounge.thoughtQuick',
+  'pixel.chat.lounge.sofa',
+  'pixel.chat.lounge.monday',
+  'pixel.chat.lounge.weekLong',
+  'pixel.chat.lounge.homeEarly',
+  'pixel.chat.lounge.meetings',
+  'pixel.chat.lounge.back',
+  'pixel.chat.lounge.focusNow',
+  'pixel.chat.lounge.whoLeft',
+  'pixel.chat.lounge.fiveMin',
+  'pixel.chat.lounge.almostDone',
+];
+
+/**
+ * A two-person exchange: the speaker asks, the other one answers on the next
+ * turn. Enough of them that a pair resting together for an hour does not loop.
+ */
 export const PAIR_LINES: Array<{ ask: MessageKey; answer: MessageKey }> = [
   { ask: 'pixel.chat.ask.weekend', answer: 'pixel.chat.answer.weekend' },
   { ask: 'pixel.chat.ask.coffee', answer: 'pixel.chat.answer.coffee' },
   { ask: 'pixel.chat.ask.lunch', answer: 'pixel.chat.answer.lunch' },
+  { ask: 'pixel.chat.ask.untilWhen', answer: 'pixel.chat.answer.untilWhen' },
+  { ask: 'pixel.chat.ask.meetingTime', answer: 'pixel.chat.answer.meetingTime' },
+  { ask: 'pixel.chat.ask.overtime', answer: 'pixel.chat.answer.overtime' },
+  { ask: 'pixel.chat.ask.sawThis', answer: 'pixel.chat.answer.sawThis' },
+  { ask: 'pixel.chat.ask.eatTogether', answer: 'pixel.chat.answer.eatTogether' },
+  { ask: 'pixel.chat.ask.shared', answer: 'pixel.chat.answer.shared' },
+  { ask: 'pixel.chat.ask.fridayOk', answer: 'pixel.chat.answer.fridayOk' },
+  { ask: 'pixel.chat.ask.weather', answer: 'pixel.chat.answer.weather' },
+  { ask: 'pixel.chat.ask.coffeeTaste', answer: 'pixel.chat.answer.coffeeTaste' },
+  { ask: 'pixel.chat.ask.howLong', answer: 'pixel.chat.answer.howLong' },
+  { ask: 'pixel.chat.ask.afterWork', answer: 'pixel.chat.answer.afterWork' },
+  { ask: 'pixel.chat.ask.meetingLong', answer: 'pixel.chat.answer.meetingLong' },
+  { ask: 'pixel.chat.ask.newHere', answer: 'pixel.chat.answer.newHere' },
+  { ask: 'pixel.chat.ask.busyWeek', answer: 'pixel.chat.answer.busyWeek' },
+  { ask: 'pixel.chat.ask.lunchMenu', answer: 'pixel.chat.answer.lunchMenu' },
 ];
+
+/** Every solo line, wherever it may be said. For tests and for callers that count. */
+export const ALL_SOLO_LINES: MessageKey[] = [...SOLO_LINES, ...PANTRY_LINES, ...LOUNGE_LINES];
+
+/**
+ * The pool one resting agent draws from. Its own corner of the office is added to
+ * the general lines only: chatter about the coffee machine in the lobby, or about
+ * the sofa by the snack table, would read as a bug rather than as small talk.
+ */
+export function soloPoolFor(area: RestArea): MessageKey[] {
+  return [...SOLO_LINES, ...(area === 'pantry' ? PANTRY_LINES : LOUNGE_LINES)];
+}
+
+/**
+ * Which line of a pool someone says on turn `turn`.
+ *
+ * The obvious `(seed + turn) % length` walks the list in order, so every agent
+ * recites the same lines in the same sequence and neighbours say adjacent ones.
+ * This mixes the turn into the seed instead: stable for a given agent and turn
+ * (two clients rendering the same second pick the same line), but spread out.
+ */
+export function lineIndex(seed: number, turn: number, length: number): number {
+  if (length <= 0) return 0;
+  const index = mixLineIndex(seed, turn, length);
+  // Never the same line twice in a row: the one thing a listener notices.
+  if (length > 1 && turn > 0 && index === mixLineIndex(seed, turn - 1, length)) return (index + 1) % length;
+  return index;
+}
+
+function mixLineIndex(seed: number, turn: number, length: number): number {
+  let value = (seed ^ Math.imul(turn + 1, 0x9e3779b1)) >>> 0;
+  value = Math.imul(value ^ (value >>> 15), 0x85ebca6b) >>> 0;
+  value = Math.imul(value ^ (value >>> 13), 0xc2b2ae35) >>> 0;
+  return ((value ^ (value >>> 16)) >>> 0) % length;
+}
+
 
 /** FNV-1a over the name: the same agent is always the same person, run to run. */
 export function restSeed(text: string): number {

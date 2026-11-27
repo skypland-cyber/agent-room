@@ -8,7 +8,7 @@
 // Every sentence comes from the dictionary (default 한국어). The tab strip, the
 // sign-in card and the setup instructions are the three places a first-time
 // visitor meets the office, so none of them may fall back to English.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { OfficeOverview, OfficeTemplate } from '@agent-room/shared';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
@@ -20,12 +20,30 @@ import { OfficeWorkPanel } from '../components/office/OfficeWorkPanel.js';
 import { OfficeArchivePanel } from '../components/office/OfficeArchivePanel.js';
 import { OfficeAutomationPanel } from '../components/office/OfficeAutomationPanel.js';
 import { OfficeSettingsPanel } from '../components/office/OfficeSettingsPanel.js';
+import { OfficeTodayCard, UsageGauge } from '../components/office/OfficeTodayCard.js';
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, SectionTitle, formatDate, timeAgo, useVisibleInterval } from '../components/office/ui.js';
 import { listTemplates, officeLogin, officeLogout, officeOverview, officeStatus, type OfficeStatus } from '../lib/officeApi.js';
 import { errorText, setupStepsText, warningText } from '../i18n/errors.js';
 import { useI18n, type MessageKey } from '../i18n/index.js';
 
 type TabKey = 'floor' | 'work' | 'staff' | 'projects' | 'record' | 'recurring' | 'limits';
+
+/**
+ * How often a visible tab re-reads the dashboard. The office's free tier allows
+ * 10,000 Redis commands a day and one refresh costs about sixteen, so half a
+ * minute (the old value) would spend a day's budget in three hours. The work tab
+ * holds approvals, so it stays twice as fresh as the reading tabs; every tab also
+ * has a manual refresh and refreshes on the way back into the browser.
+ */
+const POLL_MS: Record<TabKey, number> = {
+  floor: 240_000,
+  work: 120_000,
+  staff: 240_000,
+  projects: 240_000,
+  record: 240_000,
+  recurring: 240_000,
+  limits: 240_000,
+};
 
 const TABS: Array<{ key: TabKey; labelKey: MessageKey; badge?: (overview: OfficeOverview) => number }> = [
   { key: 'floor', labelKey: 'office.tab.floor' },
@@ -48,11 +66,21 @@ export function Office() {
   const [selectedAgent, setSelectedAgent] = useState<string | undefined>();
   const [lastRefresh, setLastRefresh] = useState<number | null>(null);
   const [templates, setTemplates] = useState<OfficeTemplate[] | null>(null);
+  /**
+   * The newest request wins: a poll that started before a manual refresh must not
+   * land afterwards and put an older payload back on the screen.
+   */
+  const requestSeq = useRef(0);
+  // The poll is minutes apart now, so "updated 2 minutes ago" has to tick by itself.
+  const [, setClock] = useState(0);
 
   const loadOverview = useCallback(async () => {
+    const seq = ++requestSeq.current;
     const next = await officeOverview();
+    if (seq !== requestSeq.current) return next;
     setOverview(next);
-    setLastRefresh(Date.now());
+    // The server's stamp, not the browser's: it says when the numbers were read.
+    setLastRefresh(next.generatedAt);
     return next;
   }, []);
 
@@ -82,7 +110,21 @@ export function Office() {
 
   useVisibleInterval(() => {
     void loadOverview().catch(() => { /* a failed poll must not clear the screen */ });
-  }, 30_000, Boolean(status?.authenticated));
+  }, POLL_MS[tab], Boolean(status?.authenticated));
+
+  useVisibleInterval(() => setClock(value => value + 1), 30_000, Boolean(overview));
+
+  const refreshNow = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await loadOverview();
+    } catch (cause) {
+      setError(cause);
+    } finally {
+      setBusy(false);
+    }
+  }, [loadOverview]);
 
   const signIn = async () => {
     setBusy(true);
@@ -128,9 +170,16 @@ export function Office() {
         </div>
         <div className="flex items-center gap-2">
           {overview ? (
-            <span className="hidden text-[11px] text-ink-faint sm:inline">
-              {lastRefresh ? t('office.header.updated', { time: timeAgo(lastRefresh) }) : ''}
-            </span>
+            <>
+              <UsageGauge overview={overview} className="hidden sm:flex" />
+              <span className="hidden text-[11px] text-ink-faint md:inline">
+                {lastRefresh ? t('office.header.updated', { time: timeAgo(lastRefresh) }) : ''}
+              </span>
+              <Button variant="quiet" onClick={() => void refreshNow()} disabled={busy}
+                title={t('office.header.refreshHint')}>
+                {busy ? t('office.header.refreshing') : `↻ ${t('office.header.refresh')}`}
+              </Button>
+            </>
           ) : null}
           <LanguageToggle />
           <Link to="/new"><Button variant="ghost">{t('office.header.openRoom')}</Button></Link>
@@ -257,6 +306,7 @@ export function Office() {
             selectedAgent={selectedAgent}
             onSelect={setSelectedAgent}
             onAddStaff={() => setTab('staff')}
+            onOpenWork={() => setTab('work')}
             onChanged={onChanged}
           />
         ) : tab === 'work' ? (
@@ -282,11 +332,12 @@ export function Office() {
   );
 }
 
-function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onChanged }: {
+function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onOpenWork, onChanged }: {
   overview: OfficeOverview;
   selectedAgent?: string;
   onSelect: (id: string | undefined) => void;
   onAddStaff: () => void;
+  onOpenWork: () => void;
   onChanged: () => void | Promise<void>;
 }) {
   const { t } = useI18n();
@@ -300,6 +351,8 @@ function FloorTab({ overview, selectedAgent, onSelect, onAddStaff, onChanged }: 
 
   return (
     <div className="grid gap-5">
+      <OfficeTodayCard overview={overview} onOpenWork={onOpenWork} />
+
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map(card => (
           <Card key={card.label} className="!p-4">

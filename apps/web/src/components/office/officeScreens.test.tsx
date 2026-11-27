@@ -14,6 +14,7 @@ import { OfficeProjectsPanel } from './OfficeProjectsPanel.js';
 import { OfficeWorkPanel } from './OfficeWorkPanel.js';
 import { OfficeAutomationPanel } from './OfficeAutomationPanel.js';
 import { OfficeSettingsPanel } from './OfficeSettingsPanel.js';
+import { OfficeTodayCard, UsageGauge } from './OfficeTodayCard.js';
 
 const now = 1_800_000_000_000;
 
@@ -49,7 +50,18 @@ const overview = {
     guidelines: [{ id: 'gdl_1', title: 'Print', body: 'CMYK', updatedAt: now, by: 'owner' }],
     createdAt: now, updatedAt: now, createdBy: 'owner', openTasks: 1, memoryCount: 1, guidelineCount: 1,
   }],
-  rooms: [{ code: 'QWE-RTY-234', topic: 'Plaque quote', status: 'active', createdAt: now, participants: 3, agents: 2, openTasks: 2, doneTasks: 1, pendingApproval: 1 }],
+  rooms: [
+    {
+      code: 'QWE-RTY-234', topic: 'Plaque quote', status: 'active', createdAt: now,
+      expiresAt: now + 30 * 24 * 3_600_000, daysLeft: 30,
+      participants: 3, agents: 2, openTasks: 2, doneTasks: 1, pendingApproval: 1,
+    },
+    {
+      code: 'OLD-RM-999', topic: 'Old quote', status: 'active', createdAt: now - 28 * 24 * 3_600_000,
+      expiresAt: now + 2 * 24 * 3_600_000, daysLeft: 2,
+      participants: 2, agents: 1, openTasks: 0, doneTasks: 4, pendingApproval: 0,
+    },
+  ],
   openTasks: [taskRef('T-01', 'pending_approval', { requiresApproval: true }), taskRef('T-02', 'in_progress'), taskRef('T-03', 'rejected', { retryCount: 1 })],
   approvals: [taskRef('T-01', 'pending_approval', { requiresApproval: true, approvalNote: 'Net 30' })],
   qaQueue: [taskRef('T-04', 'awaiting_review', { qaStatus: 'pending' })],
@@ -65,6 +77,7 @@ const overview = {
   archives: [{ id: 'arc_1', roomCode: 'QWE-RTY-234', topic: 'Plaque quote', archivedAt: now, summary: '12 messages' }],
   recentAudit: [{ id: 'aud_1', at: now, actor: { name: 'owner', kind: 'owner' as const }, action: 'login' }],
   warnings: ['1 task waiting for approval.'],
+  todaySummary: { day: '2026-11-27', doneToday: 3, inProgress: 2, needsAttention: 1, expiringRooms: 1, roomsScanned: 2 },
 } satisfies OfficeOverview;
 
 describe('office screens render', () => {
@@ -120,6 +133,31 @@ describe('office screens render', () => {
     expect(html).toContain('중단');
     expect(html).toContain('QA 대기 (1)');
     expect(html).toContain('QWE-RTY-234');
+  });
+
+  it('shows what today did, and where the room clock stands', () => {
+    const today = renderToStaticMarkup(<OfficeTodayCard overview={overview} onOpenWork={() => undefined} />);
+    expect(today).toContain('오늘 (11월 27일)');
+    expect(today).toContain('완료 3');
+    expect(today).toContain('진행 2');
+    expect(today).toContain('확인 필요 1');
+    expect(today).toContain('만료 임박 1');
+    expect(today).toContain('불러온 회의실 2곳');
+
+    // The room row carries its own lifetime: a D-day badge and the controls that
+    // otherwise live only in the API.
+    const rooms = renderToStaticMarkup(<OfficeWorkPanel overview={overview} onChanged={() => undefined} />);
+    expect(rooms).toContain('D-30');
+    expect(rooms).toContain('D-2');
+    expect(rooms).toContain('새 방');
+    expect(rooms).toContain('종료');
+    expect(rooms).toContain('삭제');
+  });
+
+  it('hides the summary when the boards were not walked, and shows the budget', () => {
+    const { todaySummary: _omitted, ...withoutSummary } = overview;
+    expect(renderToStaticMarkup(<OfficeTodayCard overview={withoutSummary} onOpenWork={() => undefined} />)).toBe('');
+    expect(renderToStaticMarkup(<UsageGauge overview={overview} />)).toContain('한도 4%');
   });
 
   it('renders the template editor and the limits panel', () => {

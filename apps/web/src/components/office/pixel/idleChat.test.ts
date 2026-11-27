@@ -9,10 +9,13 @@ import { describe, expect, it } from 'vitest';
 import type { OfficeAgentView, OfficeOverview } from '@agent-room/shared';
 import { BUILDING, MAP_H, MAP_W, SPAWN, isFloorAt, tileAtPixel } from './officeMap.js';
 import { buildOfficeGrid, findPath, isOpen } from './pathfind.js';
-import { CHAT_CYCLE_MS, CHAT_RANGE, PAIR_LINES, REST_SHIFT_MS, REST_SPOTS, SOLO_LINES, chatTurn, restSeed, restStayFor } from './idleChat.js';
+import {
+  ALL_SOLO_LINES, CHAT_CYCLE_MS, CHAT_RANGE, LOUNGE_LINES, PAIR_LINES, PANTRY_LINES, REST_SHIFT_MS, REST_SPOTS,
+  SOLO_LINES, chatTurn, lineIndex, restSeed, restStayFor, soloPoolFor,
+} from './idleChat.js';
 import { attachIdleChat, planScenes, type AgentScene } from './scene.js';
-import { BUBBLE_HEIGHT, layoutBubbles } from './bubbleLayout.js';
-import { t } from '../../../i18n/index.js';
+import { BUBBLE_HEIGHT, BUBBLE_MAX_WIDTH, layoutBubbles } from './bubbleLayout.js';
+import { t, type MessageKey } from '../../../i18n/index.js';
 
 const now = 1_800_000_000_000;
 
@@ -39,9 +42,16 @@ function resting(id: string, x: number, y: number): AgentScene {
 }
 
 const CHAT_LINES = new Set([
-  ...SOLO_LINES.map(key => t(key)),
+  ...ALL_SOLO_LINES.map(key => t(key)),
   ...PAIR_LINES.flatMap(line => [t(line.ask), t(line.answer)]),
 ]);
+
+/** Rough advance of the bubble font (bold 8px monospace) for a mixed line. */
+function lineWidth(text: string): number {
+  let width = 0;
+  for (const character of text) width += (character.codePointAt(0) ?? 0) < 0x2000 ? 4.8 : 8;
+  return width;
+}
 
 describe('rest spots', () => {
   it('keeps every spot on walkable floor with twelve desks standing', () => {
@@ -138,7 +148,7 @@ describe('small talk', () => {
       if (scene?.bubble) {
         speaking += 1;
         expect(CHAT_LINES.has(scene.bubble), `unexpected line: ${scene.bubble}`).toBe(true);
-        expect(SOLO_LINES.map(key => t(key))).toContain(scene.bubble);
+        expect(soloPoolFor('pantry').map(key => t(key))).toContain(scene.bubble);
       } else {
         silent += 1;
       }
@@ -170,18 +180,23 @@ describe('small talk', () => {
   });
 
   it('leaves two agents apart in different rooms to their own lines', () => {
-    const far = resting('ag_2', 28, 5);
+    const far = { ...resting('ag_2', 28, 5), zone: 'lounge' as const, pose: 'sit' as const };
     const near = resting('ag_1', 34, 28);
-    let solo = 0;
+    const pantryLines = soloPoolFor('pantry').map(key => t(key));
+    const loungeLines = soloPoolFor('lounge').map(key => t(key));
+    let pantry = 0;
+    let lounge = 0;
     for (let time = now; time < now + CHAT_CYCLE_MS * 4; time += 200) {
       const scenes = attachIdleChat([{ ...near }, { ...far }], time);
       for (const scene of scenes) {
         if (!scene.bubble) continue;
-        expect(SOLO_LINES.map(key => t(key))).toContain(scene.bubble);
-        solo += 1;
+        const pool = scene.agentId === 'ag_1' ? pantryLines : loungeLines;
+        expect(pool, `${scene.agentId}: ${scene.bubble}`).toContain(scene.bubble);
+        if (scene.agentId === 'ag_1') pantry += 1; else lounge += 1;
       }
     }
-    expect(solo).toBeGreaterThan(0);
+    expect(pantry).toBeGreaterThan(0);
+    expect(lounge).toBeGreaterThan(0);
   });
 
   it('keeps a quiet seat for paused staff and a Zzz for offline ones', () => {
@@ -220,6 +235,79 @@ describe('small talk', () => {
     expect(scene?.zone).toBe('meeting');
     expect(scene?.rest).toBe(false);
     expect(scene?.bubble).toContain('T-02');
+  });
+});
+
+describe('the line pools', () => {
+  const korean = (keys: typeof ALL_SOLO_LINES) => keys.map(key => t(key));
+
+  it('is deep enough that a long break does not loop', () => {
+    expect(SOLO_LINES.length).toBeGreaterThanOrEqual(30);
+    expect(PANTRY_LINES.length).toBeGreaterThanOrEqual(15);
+    expect(LOUNGE_LINES.length).toBeGreaterThanOrEqual(15);
+    expect(PAIR_LINES.length).toBeGreaterThanOrEqual(15);
+    expect(SOLO_LINES.length + PANTRY_LINES.length + LOUNGE_LINES.length).toBeGreaterThan(60);
+  });
+
+  it('never says the same thing twice, in either language', () => {
+    const solo = korean(ALL_SOLO_LINES);
+    expect(new Set(solo).size).toBe(solo.length);
+    const pairs = PAIR_LINES.flatMap(line => [t(line.ask), t(line.answer)]);
+    expect(new Set(pairs).size).toBe(pairs.length);
+    // A question and an answer are not the same sentence.
+    expect(new Set([...solo, ...pairs]).size).toBe(solo.length + pairs.length);
+  });
+
+  it('keeps every line inside a bubble, not squeezed flat', () => {
+    for (const line of [...korean(ALL_SOLO_LINES), ...PAIR_LINES.flatMap(row => [t(row.ask), t(row.answer)])]) {
+      // The renderer condenses anything wider than the box; a little is fine, a
+      // lot makes the line unreadable at 8 px.
+      expect(lineWidth(line), line).toBeLessThanOrEqual(BUBBLE_MAX_WIDTH * 1.1);
+    }
+  });
+
+  it('spreads the lines instead of reciting the list in order', () => {
+    const pool = soloPoolFor('pantry');
+    const seed = restSeed('ag_1');
+    const said = new Set<string>();
+    let previous: MessageKey | null = null;
+    for (let turn = 0; turn < 30; turn += 1) {
+      const key = pool[lineIndex(seed, turn, pool.length)]!;
+      said.add(key);
+      expect(key === previous, `turn ${turn} repeated the previous line`).toBe(false);
+      previous = key;
+    }
+    expect(said.size).toBeGreaterThanOrEqual(20);
+    // Same instant, same agent, same line — on every client.
+    expect(pool[lineIndex(seed, 7, pool.length)]).toBe(pool[lineIndex(seed, 7, pool.length)]);
+  });
+
+  it('gives the pantry and the lounge their own subjects', () => {
+    const pantryOnly = korean(PANTRY_LINES);
+    const loungeOnly = korean(LOUNGE_LINES);
+    expect(pantryOnly.some(line => line.includes('점심') || line.includes('커피'))).toBe(true);
+    expect(loungeOnly.some(line => line.includes('퇴근') || line.includes('주말'))).toBe(true);
+    // The area pool is the general lines plus that room's own.
+    expect(soloPoolFor('pantry')).toHaveLength(SOLO_LINES.length + PANTRY_LINES.length);
+    expect(soloPoolFor('lounge')).toHaveLength(SOLO_LINES.length + LOUNGE_LINES.length);
+  });
+
+  it('says a pantry line in the pantry and a lounge line on the sofa', () => {
+    // One idle agent per plan, so the scene checks the area pool rather than a
+    // two-person exchange (a pair is a conversation, and its lines travel with it).
+    const seen = new Set<string>();
+    for (const name of ['망고', '피클']) {
+      const agents = [agent('ag_1', name, 'idle')];
+      for (let offset = 0; offset < REST_SHIFT_MS * 6; offset += 500) {
+        for (const scene of planScenes(agents, office(agents), { now: now + offset })) {
+          if (!scene.bubble || !scene.rest) continue;
+          seen.add(scene.bubble);
+          const area = scene.zone === 'pantry' ? 'pantry' : 'lounge';
+          expect(soloPoolFor(area).map(key => t(key)), `${scene.zone}: ${scene.bubble}`).toContain(scene.bubble);
+        }
+      }
+    }
+    expect(seen.size).toBeGreaterThan(5);
   });
 });
 

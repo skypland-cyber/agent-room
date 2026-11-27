@@ -37,6 +37,15 @@ successful or not, is written to the audit log.
 
 ### Floor
 
+Opens with **today's summary**: how many tasks were ruled done today, how many
+are in progress, how many wait on a person (`blocked`, `rejected`,
+`pending_approval`), and how many live rooms expire within three days. It is
+counted from the boards the overview already walks — no extra read — and it is
+left out of a `withoutRooms` response, which never sees a board.
+
+Under it, four counts (staff on duty, open tasks, approvals, archived minutes)
+and the warning strip, which now also says when a room's 30 days are nearly up.
+
 A 2D pixel-art office on an HTML5 canvas, drawn from live state, not a mock: four
 rooms (CEO office, meeting room, dev lab, archive & vault) around a lobby, one
 dedicated desk per AI employee, and the boss walking between them.
@@ -131,8 +140,12 @@ Without this, a working agent was drawn offline with an empty desk, and the
   `qa.status`, `qa.notes`), and the producer can never QA its own work.
 - **Rejected work** — `Retry` (counts against the task's ceiling, optionally
   handing it to another agent) or leave it for the boss.
-- **Meetings** — rooms with their board counts, a link into the room, and
-  `Archive` to capture the minutes immediately.
+- **Meetings** — rooms with their board counts, a link into the room, a
+  `D-{n}` badge for the 30-day lifetime, and `Archive` to capture the minutes
+  immediately. `New room` opens a fresh room (work does not follow; copy the
+  unfinished cards over), `End` closes a room nobody can host any more and
+  archives its minutes, and `Delete` removes a junk room and its conversation
+  outright after a confirmation — no archive is kept.
 
 ### AI staff
 
@@ -267,12 +280,14 @@ overwrite each other.
 
 ## 6. Cost
 
-The dashboard polls `/api/office` every 30 seconds **while the tab is visible**
-and stops when it is hidden. One refresh reads the office documents plus up to
-24 rooms (two commands each). At 10,000 commands/day on the free tier that is
-comfortable for a handful of rooms, and the Limits tab shows the count climbing
-instead of letting the deployment fail quietly. Raise `dailyRequestBudget` if
-the plan allows more.
+The dashboard re-reads `/api/office` every **240 seconds** on the reading tabs
+and every **120 seconds** on the Work tab (approvals and reviews), **while the
+tab is visible**; it stops when the tab is hidden, refreshes once when it comes
+back, and has a manual refresh in the header. One refresh reads the office
+documents plus up to 24 rooms (two commands each), so a visible tab costs about
+3,720 commands over an eight-hour day instead of 29,760. The header gauge and
+the Limits tab show the same count climbing instead of letting the deployment
+fail quietly. Raise `dailyRequestBudget` if the plan allows more.
 
 ---
 
