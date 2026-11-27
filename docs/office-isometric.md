@@ -2,6 +2,10 @@
 
 2026-11-28 · `apps/web/src/components/office/iso/`
 
+![낮의 관찰 모드](assets/office-observation-day.jpg)
+
+![밤의 카페 존](assets/office-cafe-night.jpg)
+
 바닥 탭의 아이소메트릭 오피스. 1차에서 픽셀 평면도를 아이소메트릭 관제센터로 바꿨고,
 2차에서 **심즈·타이쿤처럼 구경하는 관찰 모드**(카메라·미니맵·낮밤·카페 존)를 얹었다.
 기존 오피스의 데이터·탭·액션·폴링·캐시는 그대로 두고, 그리는 방식과 배치만 바꿨다.
