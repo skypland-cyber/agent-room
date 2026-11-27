@@ -28,6 +28,11 @@ const OFFICE_ERROR_KEYS: Record<string, MessageKey> = {
   project_not_found: 'error.project_not_found',
   archive_not_found: 'error.archive_not_found',
   template_not_found: 'error.template_not_found',
+  login_locked: 'error.login_locked',
+  handoff_exists: 'error.handoff_exists',
+  room_not_active: 'error.room_not_active',
+  backup_invalid: 'error.backup_invalid',
+  backup_checksum_mismatch: 'error.backup_checksum_mismatch',
 };
 
 /** Vault codes this client itself raises; server codes fall back to its message. */
@@ -91,6 +96,13 @@ export function warningText(warning: string): string {
   }
   const expired = warning.match(/Room ([A-Z0-9-]+) has expired\./);
   if (expired) return t('warning.roomExpired', { code: expired[1] ?? '' });
+  // A handoff the office is offering: an open room running out of time with
+  // work still on its board.
+  const handoff = warning.match(/Room ([A-Z0-9-]+) expires in (\d+) days? with (\d+) open tasks? — hand the room over to keep them\./);
+  if (handoff) return t('warning.handoffDue', { code: handoff[1] ?? '', count: handoff[2] ?? '0', open: handoff[3] ?? '0' });
+  // A seat that went quiet mid-task: the stamp is stale, the board is not.
+  const quiet = warning.match(/(.+?) has not been heard from for (\d+) minutes?; ([A-Z]-\d+) is held until it reconnects\./);
+  if (quiet) return t('warning.agentQuiet', { name: quiet[1] ?? '', minutes: quiet[2] ?? '0', task: quiet[3] ?? '' });
   return warning;
 }
 

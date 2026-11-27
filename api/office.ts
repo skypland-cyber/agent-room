@@ -33,9 +33,13 @@ import {
 } from '@agent-room/shared';
 import type { OfficeAuditEntry } from '@agent-room/shared';
 import * as office from '@agent-room/upstash-client';
+import { OfficeBackupError } from '@agent-room/upstash-client';
 import { createRemoteRoomClient } from './_mcpRoomClient.js';
 import { digest, withinRateLimit } from './_roomAccess.js';
 import { siteUrl } from './_siteUrl.js';
+import { signVaultToken } from './_fileAccess.js';
+import { handoffRoom } from './_officeHandoff.js';
+import { clearLoginFailures, loginGuardState, recordLoginFailure } from './_loginGuard.js';
 import {
   clearSessionCookie,
   officeAuthState,
@@ -72,7 +76,7 @@ const WRITE_ACTIONS = new Set([
   'projects.guideline.add', 'projects.guideline.update', 'projects.guideline.delete', 'projects.link',
   'tasks.pause', 'tasks.resume', 'tasks.abort', 'tasks.approve', 'tasks.reject', 'tasks.retry', 'tasks.qa', 'tasks.requestApproval',
   'archives.capture', 'archives.delete',
-  'rooms.end', 'rooms.delete',
+  'rooms.end', 'rooms.delete', 'rooms.handoff',
   'templates.save', 'templates.delete', 'templates.apply',
   'settings.save',
   'backup.restore',
@@ -105,6 +109,10 @@ function fail(res: VercelResponse, error: unknown): void {
   }
   if (error instanceof OfficeInputError) {
     send(res, 400, { error: 'invalid_input', field: error.field, message: error.message });
+    return;
+  }
+  if (error instanceof OfficeBackupError) {
+    send(res, error.status, { error: error.code, message: error.message });
     return;
   }
   const name = (error as { name?: string }).name ?? '';
@@ -199,13 +207,37 @@ async function handleLogin(req: VercelRequest, res: VercelResponse, store: Retur
     return;
   }
   const ip = req.headers['x-vercel-forwarded-for'] ?? req.socket?.remoteAddress ?? 'unknown';
-  if (!await withinRateLimit(store, `office-login:${digest(String(ip))}`, 10)) {
+  const address = String(ip);
+  if (!await withinRateLimit(store, `office-login:${digest(address)}`, 10)) {
     res.setHeader('Retry-After', '60');
     send(res, 429, { error: 'rate_limited', message: 'Too many sign-in attempts. Wait a minute.' });
     return;
   }
+  // The fifteen-minute guard sits behind the minute limiter: the first stops a
+  // script, the second stops a patient one. Both answer with how long to wait,
+  // and the lockout is audited once per attempt so the boss can see it happen.
+  const guard = await loginGuardState(store, address);
+  if (!guard.allowed) {
+    res.setHeader('Retry-After', String(guard.retryAfterSeconds));
+    await audit(store, { name: 'unknown', kind: 'system' }, 'login.locked', {
+      detail: `${guard.lockedBy ?? 'ip'} lock, ${guard.failures} failures from this address`,
+    });
+    send(res, 429, {
+      error: 'login_locked',
+      message: guard.lockedBy === 'global'
+        ? 'Sign-in is paused after too many failed attempts in the last 15 minutes. Try again later.'
+        : 'Too many failed attempts from this address. Try again in 15 minutes.',
+      retryAfterSeconds: guard.retryAfterSeconds,
+    });
+    return;
+  }
   if (!verifyPassword(req.body?.password)) {
-    await audit(store, { name: 'unknown', kind: 'system' }, 'login.failed', { detail: String(ip).slice(0, 80) });
+    const after = await recordLoginFailure(store, address);
+    await audit(store, { name: 'unknown', kind: 'system' }, 'login.failed', {
+      // A digest, not the address: enough to tell attempts apart, not enough to
+      // keep a visitor's IP in office history.
+      detail: `${digest(address).slice(0, 12)} (${after.failures}/${5} this window)`,
+    });
     send(res, 401, { error: 'invalid_password', message: 'That password does not match ADMIN_PASSWORD.' });
     return;
   }
@@ -215,6 +247,7 @@ async function handleLogin(req: VercelRequest, res: VercelResponse, store: Retur
     return;
   }
   setSessionCookie(req, res, token);
+  await clearLoginFailures(store, address);
   await audit(store, OWNER, 'login', { detail: state.weakPassword ? 'weak password' : undefined });
   send(res, 200, { authenticated: true, expiresInSeconds: 12 * 60 * 60 });
 }
@@ -465,12 +498,23 @@ async function handleTasks(store: ReturnType<typeof officeStore>, action: string
  * dashboard instead of sitting there as an empty ended room.
  */
 async function handleRooms(store: ReturnType<typeof officeStore>, action: string, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
-  if (action !== 'rooms.end' && action !== 'rooms.delete') {
+  if (action !== 'rooms.end' && action !== 'rooms.delete' && action !== 'rooms.handoff') {
     throw new OfficeApiError(`Unknown rooms action ${action}.`, 400, 'bad_request');
   }
   const code = requireCode(body);
   const room = await office.getRoom(store, code).catch(() => undefined);
   if (!room) throw new OfficeApiError(`No room ${code} (rooms expire 30 days after creation).`, 404, 'room_not_found');
+  if (action === 'rooms.handoff') {
+    // The successor is opened, the open cards are recreated with their ids, the
+    // note explains where they came from, and the source is archived. Ending
+    // the source is a separate, explicit choice (`endSource`).
+    const result = await handoffRoom(store, code, OWNER, {
+      ...(str(body.ownerName, 80) ? { ownerName: str(body.ownerName, 80) } : {}),
+      endSource: bool(body.endSource),
+    });
+    send(res, 200, result);
+    return;
+  }
   const messages = await office.listMessages(store, code, 0).catch(() => []);
   const summary = {
     code, topic: room.topic, createdBy: room.createdBy, status: room.status,
@@ -485,14 +529,23 @@ async function handleRooms(store: ReturnType<typeof officeStore>, action: string
     send(res, 200, { room: { ...summary, status: ended.status, endedAt: ended.endedAt } });
     return;
   }
+  // Deliverables are meant to outlive their room, so deleting a room that
+  // produced any archives them first: the room and then the transcript go, the
+  // files and their index stay. Deleting the minutes of a room that produced
+  // work is not something "delete the room" was ever asking for.
+  const deliverables = await office.listVaultFiles(store, 'deliverable', code).catch(() => []);
+  const archived = deliverables.length > 0
+    ? await captureRoomArchive(store, code, OWNER).catch(() => null)
+    : null;
   await office.unregisterBoardRoom(store, code);
   await office.unregisterOfficeRoom(store, code);
   await office.deleteRoomData(store, code);
   await audit(store, OWNER, 'room.delete', {
     roomCode: code,
-    detail: `${room.topic.slice(0, 100)} · ${messages.length} messages discarded`,
+    detail: `${room.topic.slice(0, 100)} · ${messages.length} messages discarded`
+      + (archived ? ` · ${deliverables.length} deliverables kept in archive ${archived.id}` : ''),
   });
-  send(res, 200, { deleted: true, ...summary });
+  send(res, 200, { deleted: true, ...summary, ...(archived ? { archiveId: archived.id, keptDeliverables: deliverables.length } : {}) });
 }
 
 async function handleArchives(store: ReturnType<typeof officeStore>, action: string, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
@@ -507,6 +560,8 @@ async function handleArchives(store: ReturnType<typeof officeStore>, action: str
         archivedAt: archive.archivedAt, summary: archive.summary,
         messageCount: archive.messageCount, participants: archive.participants,
         tags: archive.tags, projectId: archive.projectId,
+        deliverableCount: archive.deliverables?.length ?? 0,
+        ...(archive.successorRoomCode ? { successorRoomCode: archive.successorRoomCode } : {}),
         snippet: query ? archiveSnippet(archive, query) : archive.summary,
         matched: query ? archiveMatches(archive, query) : true,
       })),
@@ -664,17 +719,85 @@ async function handleBackup(store: ReturnType<typeof officeStore>, action: strin
     send(res, 200, { backup });
     return;
   }
+  if (action === 'backup.verify') {
+    // The preview: shape, version, digest and counts, with no write at all. The
+    // dashboard shows this before the restore button becomes meaningful.
+    const backup = body.backup;
+    if (!backup || typeof backup !== 'object') throw new OfficeInputError('Send the backup file as `backup`.', 'backup');
+    const validation = office.validateOfficeBackup(backup);
+    send(res, 200, validation);
+    return;
+  }
+  if (action === 'backup.snapshots') {
+    send(res, 200, { snapshots: await office.listBackupSnapshots(store) });
+    return;
+  }
   if (action === 'backup.restore') {
     const backup = body.backup as Record<string, unknown> | undefined;
     if (!backup || typeof backup !== 'object') throw new OfficeInputError('Send the backup file as `backup`.', 'backup');
     if (JSON.stringify(backup).length > 4_000_000) throw new OfficeInputError('That backup is larger than one request can restore (4 MB).', 'backup');
     const mode = str(body.mode, 10) === 'replace' ? 'replace' as const : 'merge' as const;
-    const result = await office.importOffice(store, backup as Parameters<typeof office.importOffice>[1], mode, now);
-    await audit(store, OWNER, 'backup.restore', { detail: `${mode}: ${result.agents} agents, ${result.projects} projects, ${result.archives} archives` });
-    send(res, 200, { restored: result, mode });
+    const dryRun = bool(body.dryRun);
+    const result = await office.importOffice(
+      store,
+      backup as Parameters<typeof office.importOffice>[1],
+      mode,
+      now,
+      { dryRun, allowChecksumMismatch: bool(body.allowChecksumMismatch), actor: 'owner' },
+    );
+    if (!dryRun) {
+      await audit(store, OWNER, 'backup.restore', {
+        detail: `${mode}: ${result.agents} agents, ${result.projects} projects, ${result.archives} archives`
+          + `${result.snapshotId ? ` · snapshot ${result.snapshotId}` : ''}`
+          + `${result.checksum ? ` · checksum ${result.checksum}` : ''}`,
+      });
+    }
+    send(res, 200, { restored: result, mode, dryRun });
     return;
   }
   throw new OfficeApiError(`Unknown backup action ${action}.`, 400, 'bad_request');
+}
+
+/**
+ * The permanent deliverables vault, read from the archive index.
+ *
+ * Deliverable bytes live under a prefix room cleanup never touches and their
+ * records carry no TTL, so the files survive the room — but the room's own
+ * vault keys do not, and that is where a reader used to find them. This is the
+ * index that outlives the room: it is built from the archives, and every entry
+ * gets a fresh signed download link (the `/api/files` token path checks the file
+ * record, not the room).
+ */
+async function handleDeliverables(store: ReturnType<typeof officeStore>, action: string, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
+  if (action !== 'deliverables.list') throw new OfficeApiError(`Unknown deliverables action ${action}.`, 400, 'bad_request');
+  const archiveId = str(body.archiveId, 60);
+  const roomCode = str(body.code, 20).toUpperCase();
+  const query = str(body.query, 120).toLowerCase();
+  const limit = Math.max(1, Math.min(200, num(body.limit) ?? 200));
+  const archives = archiveId
+    ? [await office.getArchive(store, archiveId)].filter((archive): archive is NonNullable<typeof archive> => Boolean(archive))
+    : await office.listArchives(store, 200);
+  const files: Array<Record<string, unknown>> = [];
+  for (const archive of archives) {
+    if (roomCode && archive.roomCode !== roomCode) continue;
+    for (const file of archive.deliverables ?? []) {
+      const haystack = `${file.name} ${file.producer ?? ''} ${file.taskId ?? ''} ${archive.topic}`.toLowerCase();
+      if (query && !haystack.includes(query)) continue;
+      const token = signVaultToken({ c: archive.roomCode, k: 'deliverable', f: file.id, ttlMs: 60 * 60_000 });
+      files.push({
+        archiveId: archive.id,
+        roomCode: archive.roomCode,
+        topic: archive.topic,
+        archivedAt: archive.archivedAt,
+        ...file,
+        downloadUrl: token
+          ? `${siteUrl()}/api/files?token=${encodeURIComponent(token)}&name=${encodeURIComponent(file.name)}`
+          : null,
+      });
+    }
+  }
+  files.sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
+  send(res, 200, { files: files.slice(0, limit), total: files.length });
 }
 
 async function handleUsage(store: ReturnType<typeof officeStore>, res: VercelResponse): Promise<void> {
@@ -741,7 +864,18 @@ async function routeOffice(
 
   // Every authenticated call is counted, and writes separately, because the
   // dashboard's own polling is what the free tier's command budget pays for.
-  if (WRITE_ACTIONS.has(action)) await office.bumpUsage(store, kstDay(Date.now()), 'writes').catch(() => 0);
+  if (WRITE_ACTIONS.has(action)) {
+    // A write is the expensive, destructive half of this API: it is the one
+    // worth a per-minute ceiling of its own. Sixty a minute is far above what
+    // one person clicking a dashboard produces and far below what a script
+    // that got hold of a session could use to burn the day's commands.
+    const address = String(req.headers['x-vercel-forwarded-for'] ?? req.socket?.remoteAddress ?? 'unknown');
+    if (!await withinRateLimit(store, `office-write:${digest(address)}`, 60)) {
+      res.setHeader('Retry-After', '60');
+      throw new OfficeApiError('Too many office changes in a minute. Wait a moment.', 429, 'rate_limited');
+    }
+    await office.bumpUsage(store, kstDay(Date.now()), 'writes').catch(() => 0);
+  }
   await office.bumpUsage(store, kstDay(Date.now()), 'requests').catch(() => 0);
 
   if (action === 'overview') {
@@ -759,7 +893,7 @@ async function routeOffice(
     return;
   }
   if (action === 'rooms.list') { send(res, 200, { rooms: await roomSummaries(store) }); return; }
-  if (action === 'rooms.end' || action === 'rooms.delete') { await handleRooms(store, action, body, res); return; }
+  if (action === 'rooms.end' || action === 'rooms.delete' || action === 'rooms.handoff') { await handleRooms(store, action, body, res); return; }
   if (action === 'audit.list') {
     // `body.action` is the router's opcode ("audit.list"); the log's action
     // filter is a separate field, or a `filter` object for convenience.
@@ -790,6 +924,7 @@ async function routeOffice(
   if (action.startsWith('projects.')) { await handleProjects(store, action, body, res); return; }
   if (action.startsWith('tasks.')) { await handleTasks(store, action, body, res); return; }
   if (action.startsWith('archives.')) { await handleArchives(store, action, body, res); return; }
+  if (action.startsWith('deliverables.')) { await handleDeliverables(store, action, body, res); return; }
   if (action.startsWith('templates.')) { await handleTemplates(store, action, body, res); return; }
   if (action.startsWith('backup.')) { await handleBackup(store, action, body, res); return; }
 

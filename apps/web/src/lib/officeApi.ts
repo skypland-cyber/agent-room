@@ -129,6 +129,9 @@ export interface ArchiveSummary {
   participants: string[];
   tags: string[];
   projectId?: string;
+  /** Deliverables kept with this meeting (they outlive the room). */
+  deliverableCount?: number;
+  successorRoomCode?: string;
   snippet: string;
   matched: boolean;
 }
@@ -145,6 +148,52 @@ export const endRoom = (code: string) =>
 /** Remove a junk room and its data outright — no archive is kept. */
 export const deleteRoom = (code: string) =>
   request<{ deleted: boolean; code: string }>('rooms.delete', { code });
+
+/**
+ * Carry a room's open work into a successor. The source room is left open.
+ *
+ * The successor gets the same task ids, the same agents and one note explaining
+ * where the cards came from; the source is archived on the way, so its minutes
+ * and deliverables are indexed whatever happens to it next.
+ */
+export interface HandoffResult {
+  sourceCode: string;
+  successorCode: string;
+  joinUrl: string;
+  roomUrl: string;
+  topic: string;
+  carried: Array<{ id: string; title: string; state: string; owner?: string }>;
+  skipped: string[];
+  deliverables: number;
+  seated: string[];
+  archiveId?: string;
+  sourceEnded: boolean;
+  daysLeft: number;
+}
+
+export const handoffRoom = (code: string, options: { endSource?: boolean; ownerName?: string } = {}) =>
+  request<HandoffResult>('rooms.handoff', { code, ...options });
+
+export interface DeliverableEntry {
+  archiveId: string;
+  roomCode: string;
+  topic: string;
+  archivedAt: number;
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  version: number;
+  producer?: string;
+  taskId?: string;
+  createdAt: number;
+  /** Fresh signed link (one hour); null when signing is not configured. */
+  downloadUrl: string | null;
+}
+
+/** The deliverables vault that outlives every room, read from the archive index. */
+export const listDeliverables = (options: { archiveId?: string; code?: string; query?: string; limit?: number } = {}) =>
+  request<{ files: DeliverableEntry[]; total: number }>('deliverables.list', options);
 export const deleteArchive = (id: string) => request<{ removed: boolean }>('archives.delete', { id });
 
 export const listAudit = (filter: Record<string, unknown> = {}) =>
@@ -182,5 +231,30 @@ export const getUsage = () =>
 
 export const exportBackup = (includeBoards = false) =>
   request<{ backup: unknown }>('backup.export', { includeBoards }).then(payload => payload.backup);
-export const restoreBackup = (backup: unknown, mode: 'merge' | 'replace') =>
-  request<{ restored: Record<string, unknown>; mode: string }>('backup.restore', { backup, mode });
+
+export interface BackupValidation {
+  ok: boolean;
+  /** Shape/version check only, without the checksum verdict. */
+  shapeOk: boolean;
+  issues: string[];
+  warnings: string[];
+  summary: {
+    agents: number; projects: number; templates: number; archives: number; audit: number;
+    deliverables: number; boards: number; exportedAt?: number; exportedBy?: string; settingsBudget?: number;
+  };
+  checksum: { verdict: 'verified' | 'missing' | 'mismatch'; stored?: string; computed: string };
+}
+
+/** Check a backup file without writing anything (the restore's preview). */
+export const verifyBackup = (backup: unknown) =>
+  request<BackupValidation>('backup.verify', { backup });
+
+export interface BackupSnapshotInfo { id: string; at: number }
+export const listBackupSnapshots = () =>
+  request<{ snapshots: BackupSnapshotInfo[] }>('backup.snapshots').then(payload => payload.snapshots);
+
+export const restoreBackup = (
+  backup: unknown,
+  mode: 'merge' | 'replace',
+  options: { dryRun?: boolean; allowChecksumMismatch?: boolean } = {},
+) => request<{ restored: Record<string, unknown>; mode: string; dryRun: boolean }>('backup.restore', { backup, mode, ...options });

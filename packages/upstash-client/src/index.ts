@@ -12,4 +12,5 @@ export * from './waitlist.js';
 export * from './webhooks.js';
 export * from './vault.js';
 export * from './office.js';
+export * from './officeBackup.js';
 export { sha256Hex } from './sha256.js';

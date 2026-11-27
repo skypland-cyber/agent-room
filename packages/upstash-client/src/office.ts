@@ -13,6 +13,7 @@
 import type {
   OfficeAgent,
   OfficeArchive,
+  OfficeArchiveFile,
   OfficeAuditEntry,
   OfficeGuideline,
   OfficeMemoryEntry,
@@ -34,6 +35,7 @@ import {
 } from '@agent-room/shared';
 import type { Message, Room, Task, TaskBoard } from '@agent-room/shared';
 import type { UpstashClient } from './client.js';
+import { backupChecksum, OFFICE_BACKUP_FORMAT, OFFICE_BACKUP_VERSION, OfficeBackupError, validateOfficeBackup, type OfficeBackup } from './officeBackup.js';
 
 const PREFIX = 'office:v1';
 const key = (...parts: string[]) => [PREFIX, ...parts].join(':');
@@ -133,7 +135,27 @@ export async function saveOfficeSettings(client: UpstashClient, patch: Partial<R
 export interface AgentHeartbeat {
   at: number;
   roomCode?: string;
+  /** How long the seat was quiet before this stamp, when it came back from a gap. */
+  gapMs?: number;
+  /** The moment this stamp ended a gap; a resumed session starts here. */
+  resumedAt?: number;
+  /** Reconnections this seat has made, carried in the stamp it already writes. */
+  reconnects?: number;
+  /** The gap of the most recent reconnection. */
+  lastGapMs?: number;
+  /** When the most recent silence started (`at - gapMs`). */
+  lastDropAt?: number;
 }
+
+/**
+ * How long a silence has to be before a new heartbeat is a *reconnection*.
+ *
+ * Stamps are throttled to one per 30 seconds and a listen window can be a
+ * minute long, so ordinary polling produces gaps of that size. Ninety seconds
+ * is past every normal cadence and still short enough that a client that was
+ * killed and restarted is recognised as coming back.
+ */
+export const LINK_GAP_MS = 90_000;
 
 export async function listAgents(client: UpstashClient): Promise<OfficeAgent[]> {
   const agents = await readCollection<OfficeAgent>(client, AGENTS, agentKey);
@@ -227,6 +249,7 @@ export async function readHeartbeat(client: UpstashClient, name: string): Promis
   return readJson<AgentHeartbeat>(client, heartbeatKey(name));
 }
 
+
 export async function listHeartbeats(client: UpstashClient, names: string[]): Promise<Record<string, AgentHeartbeat>> {
   if (names.length === 0) return {};
   const rows = await Promise.all(names.map(name => readHeartbeat(client, name)));
@@ -250,7 +273,7 @@ export async function listHeartbeats(client: UpstashClient, names: string[]): Pr
 export async function recordAgentHeartbeat(
   client: UpstashClient,
   input: { name: string; roomCode?: string; at: number; throttleMs?: number; registerIfUnknown?: boolean },
-): Promise<{ recorded: boolean; agentId?: string }> {
+): Promise<{ recorded: boolean; agentId?: string; reconnected?: boolean; gapMs?: number }> {
   const name = input.name?.trim();
   if (!name) return { recorded: false };
   const throttle = input.throttleMs ?? 30_000;
@@ -258,6 +281,12 @@ export async function recordAgentHeartbeat(
   // The common case is a listen loop inside the window: answer from the one
   // read we already did instead of also looking the agent up.
   if (previous && input.at - previous.at < throttle) return { recorded: false };
+  // A silence longer than LINK_GAP_MS is a reconnection, not a poll: the seat
+  // was away, and whatever it was executing at the time is still on the board.
+  // The gap is recorded in the stamp, so the next reader (the office, the
+  // agent's own join result) can say how long it was gone without another key.
+  const gapMs = previous ? Math.max(0, input.at - previous.at) : undefined;
+  const reconnected = gapMs !== undefined && gapMs >= LINK_GAP_MS;
   let agent = await findAgentForRoomName(client, name);
   if (!agent && input.registerIfUnknown) {
     // Opt-in discovery: a listening seat nobody has entered in the roster is
@@ -282,7 +311,17 @@ export async function recordAgentHeartbeat(
   // are stamped: the seat itself polls under the room name (that is the key the
   // throttle above reads), and the dashboard polls under the roster name. One
   // pipeline, so a decorated name costs one round trip, not two.
-  const stamp = { at: input.at, ...(input.roomCode ? { roomCode: input.roomCode } : {}) };
+  const reconnects = Math.max(0, Math.min(99_999, (previous?.reconnects ?? 0) + (reconnected ? 1 : 0)));
+  const stamp: AgentHeartbeat = {
+    at: input.at,
+    ...(input.roomCode ? { roomCode: input.roomCode } : {}),
+    ...(reconnects > 0 ? { reconnects } : {}),
+    ...(reconnected && gapMs !== undefined
+      ? { gapMs, resumedAt: input.at, lastGapMs: gapMs, lastDropAt: input.at - gapMs }
+      : previous?.lastGapMs !== undefined
+        ? { lastGapMs: previous.lastGapMs, ...(previous.lastDropAt !== undefined ? { lastDropAt: previous.lastDropAt } : {}) }
+        : {}),
+  };
   const stampNames = agent && agent.name.trim().toLowerCase() !== name.toLowerCase()
     ? [name, agent.name]
     : [name];
@@ -306,9 +345,9 @@ export async function recordAgentHeartbeat(
         }
       });
     }
-    return { recorded: true, agentId: agent.id };
+    return { recorded: true, agentId: agent.id, ...(reconnected && gapMs !== undefined ? { reconnected, gapMs } : {}) };
   }
-  return { recorded: true };
+  return { recorded: true, ...(reconnected && gapMs !== undefined ? { reconnected, gapMs } : {}) };
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────
@@ -564,7 +603,21 @@ export async function getArchive(client: UpstashClient, id: string): Promise<Off
  */
 export async function archiveRoom(
   client: UpstashClient,
-  input: { room: Pick<Room, 'code' | 'topic' | 'createdBy' | 'createdAt'>; messages: Message[]; tasks?: Task[]; tags?: string[]; projectId?: string; now: number; board?: TaskBoard | null },
+  input: {
+    room: Pick<Room, 'code' | 'topic' | 'createdBy' | 'createdAt'>;
+    messages: Message[];
+    tasks?: Task[];
+    tags?: string[];
+    projectId?: string;
+    now: number;
+    board?: TaskBoard | null;
+    /** Deliverables produced in the room — snapshotted so they outlive it. */
+    deliverables?: OfficeArchiveFile[];
+    /** Materials were room-scoped; only their count is worth keeping. */
+    materialCount?: number;
+    /** Where this room's open work was carried, when it was handed over. */
+    successorRoomCode?: string;
+  },
 ): Promise<OfficeArchive> {
   const existingId = await client.command<string | null>(['GET', archiveRoomKey(input.room.code)]);
   const existing = existingId ? await getArchive(client, existingId) : null;
@@ -592,6 +645,17 @@ export async function archiveRoom(
     })),
     ...(input.projectId ? { projectId: input.projectId } : existing?.projectId ? { projectId: existing.projectId } : {}),
     tags: input.tags ?? existing?.tags ?? [],
+    // Deliverables are cumulative: a later capture (an end, then a handoff)
+    // must never shrink the set the first one recorded.
+    ...(input.deliverables && input.deliverables.length > 0
+      ? { deliverables: mergeArchiveFiles(existing?.deliverables, input.deliverables) }
+      : existing?.deliverables ? { deliverables: existing.deliverables } : {}),
+    ...(input.materialCount !== undefined
+      ? { materialCount: Math.max(input.materialCount, existing?.materialCount ?? 0) }
+      : existing?.materialCount !== undefined ? { materialCount: existing.materialCount } : {}),
+    ...(input.successorRoomCode
+      ? { successorRoomCode: input.successorRoomCode }
+      : existing?.successorRoomCode ? { successorRoomCode: existing.successorRoomCode } : {}),
   };
   await writeJson(client, archiveKey(archive.id), archive);
   await client.pipeline([
@@ -602,6 +666,17 @@ export async function archiveRoom(
   // deleting minutes the boss asked to keep permanently is not a retention
   // decision this layer may take on its own.
   return archive;
+}
+
+/** Union of two archive file lists, newest metadata winning per file id. */
+function mergeArchiveFiles(
+  before: OfficeArchiveFile[] | undefined,
+  after: OfficeArchiveFile[],
+): OfficeArchiveFile[] {
+  const byId = new Map<string, OfficeArchiveFile>();
+  for (const file of before ?? []) byId.set(file.id, file);
+  for (const file of after) byId.set(file.id, file);
+  return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function deleteArchive(client: UpstashClient, id: string): Promise<boolean> {
@@ -635,6 +710,14 @@ export interface OfficeRoomRecord {
   projectId?: string;
   templateId?: string;
   registeredAt: number;
+  /** Where this room's open work was carried, when it was handed over. */
+  successorRoomCode?: string;
+  /** The room this one continues, when it was opened by a handoff. */
+  predecessorRoomCode?: string;
+  handoffAt?: number;
+  handoffBy?: string;
+  /** Number of cards the handoff carried, for the room list. */
+  handoffTaskCount?: number;
 }
 
 export async function registerOfficeRoom(
@@ -642,11 +725,18 @@ export async function registerOfficeRoom(
   code: string,
   meta: { projectId?: string; templateId?: string; at: number },
 ): Promise<void> {
+  // Merge, never replace. Registering happens on several paths (a template run,
+  // an archive capture, a handoff) and a later call must not erase what an
+  // earlier one taught the office about the room — the successor link in
+  // particular is written once and then re-registered by the archive capture
+  // that immediately follows it.
+  const existing = await readJson<OfficeRoomRecord>(client, roomKey(code)).catch(() => null);
   const record: OfficeRoomRecord = {
+    ...(existing ?? {}),
     code,
-    ...(meta.projectId ? { projectId: meta.projectId } : {}),
-    ...(meta.templateId ? { templateId: meta.templateId } : {}),
-    registeredAt: meta.at,
+    ...(meta.projectId ?? existing?.projectId ? { projectId: meta.projectId ?? existing?.projectId } : {}),
+    ...(meta.templateId ?? existing?.templateId ? { templateId: meta.templateId ?? existing?.templateId } : {}),
+    registeredAt: existing?.registeredAt ?? meta.at,
   };
   await writeJson(client, roomKey(code), record);
   await client.command(['SADD', ROOMS, code]);
@@ -658,6 +748,82 @@ export async function listOfficeRooms(client: UpstashClient): Promise<string[]> 
 
 export async function getOfficeRoomRecord(client: UpstashClient, code: string): Promise<OfficeRoomRecord | null> {
   return readJson<OfficeRoomRecord>(client, roomKey(code));
+}
+
+/**
+ * Records for several rooms in one round trip.
+ *
+ * The dashboard needs every room's handoff links, not just the expiring ones —
+ * a successor is by definition new and healthy. One pipeline keeps that at one
+ * HTTP request instead of one per room.
+ */
+export async function listOfficeRoomRecords(
+  client: UpstashClient,
+  codes: string[],
+): Promise<Record<string, OfficeRoomRecord>> {
+  if (codes.length === 0) return {};
+  const rows = await client.pipeline<string | null>(codes.map(code => ['GET', roomKey(code)]));
+  const out: Record<string, OfficeRoomRecord> = {};
+  codes.forEach((code, index) => {
+    const raw = rows[index];
+    if (typeof raw !== 'string' || !raw) return;
+    try {
+      const parsed = JSON.parse(raw) as OfficeRoomRecord;
+      if (parsed && typeof parsed.code === 'string') out[code] = parsed;
+    } catch { /* one corrupt record must not blank the room list */ }
+  });
+  return out;
+}
+
+/**
+ * Remember that a room's open work moved to a successor.
+ *
+ * The record is the office's own (no TTL): the source room expires in 30 days
+ * and its registry entry would go with it, but the link between the two rooms
+ * is part of the office's history and the dashboard's "where did this go".
+ * Both ends are written, so either room can name the other.
+ */
+export async function recordRoomHandoff(
+  client: UpstashClient,
+  input: {
+    sourceCode: string;
+    successorCode: string;
+    at: number;
+    by: string;
+    taskCount: number;
+    projectId?: string;
+    topic?: string;
+    /** Topic the successor was opened under, so it can be listed like any room. */
+    successorTopic?: string;
+  },
+): Promise<{ source: OfficeRoomRecord; successor: OfficeRoomRecord }> {
+  const now = input.at;
+  const sourceCurrent = await getOfficeRoomRecord(client, input.sourceCode);
+  const source: OfficeRoomRecord = {
+    ...(sourceCurrent ?? { code: input.sourceCode, registeredAt: now }),
+    code: input.sourceCode,
+    ...(input.projectId ?? sourceCurrent?.projectId ? { projectId: input.projectId ?? sourceCurrent?.projectId } : {}),
+    successorRoomCode: input.successorCode,
+    handoffAt: now,
+    handoffBy: input.by,
+    handoffTaskCount: input.taskCount,
+  };
+  const successorCurrent = await getOfficeRoomRecord(client, input.successorCode);
+  const successor: OfficeRoomRecord = {
+    ...(successorCurrent ?? { code: input.successorCode, registeredAt: now }),
+    code: input.successorCode,
+    ...(input.projectId ?? successorCurrent?.projectId ? { projectId: input.projectId ?? successorCurrent?.projectId } : {}),
+    predecessorRoomCode: input.sourceCode,
+    handoffAt: now,
+    handoffBy: input.by,
+  };
+  await client.pipeline([
+    ['SET', roomKey(input.sourceCode), JSON.stringify(source)],
+    ['SADD', ROOMS, input.sourceCode],
+    ['SET', roomKey(input.successorCode), JSON.stringify(successor)],
+    ['SADD', ROOMS, input.successorCode],
+  ]);
+  return { source, successor };
 }
 
 /**
@@ -785,20 +951,49 @@ export async function agentCapacity(
 }
 
 // ─── Backup / restore ─────────────────────────────────────────────────────
+//
+// The backup is the office's escape hatch: everything the office is, in one
+// JSON file the boss keeps outside this deployment. Two properties make it
+// usable rather than decorative:
+//
+//   - it is *verifiable*: the export stamps a SHA-256 over a canonical rendering
+//     of its contents, and a restore refuses a file whose stamp disagrees;
+//   - it is *reversible*: a restore snapshots the current office first, so the
+//     action that replaces the office is itself undoable from the dashboard.
+//
+// A restore never writes room boards: they are live meeting state owned by the
+// room layer, and rewriting them from a file would overwrite what seats still
+// poll. The file's boards are a read-only record.
 
-export interface OfficeBackup {
-  format: 'agent-room-office-backup';
-  version: 1;
-  exportedAt: number;
-  exportedBy: string;
-  settings: OfficeSettings;
-  agents: OfficeAgent[];
-  projects: OfficeProject[];
-  templates: OfficeTemplate[];
-  archives: OfficeArchive[];
-  audit: OfficeAuditEntry[];
-  /** Present when the export asked for room snapshots too (read-only record). */
-  boards?: Record<string, TaskBoard>;
+const BACKUP_SNAPSHOTS = key('backup', 'snapshots');
+const backupSnapshotKey = (id: string) => key('backup', 'snapshot', id);
+const BACKUP_SNAPSHOT_KEEP = 3;
+const BACKUP_SNAPSHOT_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+export interface RestoreResult {
+  agents: number;
+  projects: number;
+  templates: number;
+  archives: number;
+  audit: number;
+  skipped: string[];
+  /** True when nothing was written (a preview). */
+  dryRun?: boolean;
+  /** The pre-restore snapshot, when one was taken. */
+  snapshotId?: string;
+  /** Checksum verdict the restore acted on. */
+  checksum?: 'verified' | 'missing' | 'mismatch';
+  issues?: string[];
+  warnings?: string[];
+}
+
+export interface ImportOptions {
+  /** Preview only: validate and report, write nothing. */
+  dryRun?: boolean;
+  /** Restore a file whose digest disagrees (audited; never the default). */
+  allowChecksumMismatch?: boolean;
+  /** Recorded on the pre-restore snapshot and in the audit line. */
+  actor?: string;
 }
 
 export async function exportOffice(
@@ -815,9 +1010,9 @@ export async function exportOffice(
     listArchives(client, OFFICE_ARCHIVE_MAX),
     readAudit(client, OFFICE_AUDIT_RETENTION),
   ]);
-  return {
-    format: 'agent-room-office-backup',
-    version: 1,
+  const payload = {
+    format: OFFICE_BACKUP_FORMAT as typeof OFFICE_BACKUP_FORMAT,
+    version: OFFICE_BACKUP_VERSION,
     exportedAt: now,
     exportedBy: actor,
     settings,
@@ -828,31 +1023,142 @@ export async function exportOffice(
     audit,
     ...(boards ? { boards } : {}),
   };
+  return {
+    ...payload,
+    integrity: { algorithm: 'sha256' as const, digest: await backupChecksum(payload), at: now },
+  };
 }
 
-export interface RestoreResult {
+/**
+ * What a pre-restore snapshot keeps.
+ *
+ * Messages are the bulk of an archive and the least useful thing to restore
+ * verbatim (the minutes are derived from them and survive); dropping them keeps
+ * a snapshot small enough to write on the free tier while still restoring every
+ * staff entry, project, template, archive record and audit line.
+ */
+function snapshotPayload(backup: OfficeBackup): OfficeBackup {
+  return {
+    ...backup,
+    archives: backup.archives.map(archive => ({ ...archive, messages: [] })),
+    audit: backup.audit.slice(-200),
+    boards: undefined,
+  };
+}
+
+/** Snapshot the office before it is overwritten, keeping the last few. */
+export async function snapshotOffice(
+  client: UpstashClient,
+  actor: string,
+  now: number,
+): Promise<{ id: string; at: number; agents: number; projects: number; archives: number }> {
+  const backup = await exportOffice(client, actor, now);
+  const stored = snapshotPayload(backup);
+  // The snapshot is storage about storage: it must never be bigger than one
+  // Redis value comfortably is. Archives are capped and messages are dropped;
+  // if a pathological office still goes over, the snapshot records the counts
+  // only rather than failing the restore.
+  const id = `snap_${now.toString(36)}`;
+  const body = JSON.stringify(stored);
+  const safe = body.length <= 3_000_000
+    ? stored
+    : { ...stored, archives: stored.archives.map(({ minutes: _m, ...rest }) => rest) };
+  await client.pipeline([
+    ['SET', backupSnapshotKey(id), JSON.stringify(safe), 'EX', String(BACKUP_SNAPSHOT_TTL_SECONDS)],
+    ['SADD', BACKUP_SNAPSHOTS, id],
+    ['EXPIRE', BACKUP_SNAPSHOTS, String(BACKUP_SNAPSHOT_TTL_SECONDS)],
+  ]);
+  // Trim the index to the newest few. Ids are timestamp-derived, so a string
+  // sort is a chronological sort.
+  const ids = (await readIndex(client, BACKUP_SNAPSHOTS)).sort();
+  const stale = ids.slice(0, Math.max(0, ids.length - BACKUP_SNAPSHOT_KEEP));
+  if (stale.length) {
+    await client.pipeline([
+      ...stale.map(old => ['DEL', backupSnapshotKey(old)] as (string | number)[]),
+      ['SREM', BACKUP_SNAPSHOTS, ...stale],
+    ]);
+  }
+  return {
+    id,
+    at: now,
+    agents: stored.agents.length,
+    projects: stored.projects.length,
+    archives: stored.archives.length,
+  };
+}
+
+export interface BackupSnapshotInfo {
+  id: string;
+  at: number;
   agents: number;
   projects: number;
-  templates: number;
   archives: number;
-  audit: number;
-  skipped: string[];
+}
+
+/** Newest first. The ids carry the timestamp, so no extra metadata read is needed. */
+export async function listBackupSnapshots(client: UpstashClient): Promise<BackupSnapshotInfo[]> {
+  const ids = (await readIndex(client, BACKUP_SNAPSHOTS)).sort().reverse();
+  return ids.map(id => {
+    const match = /^snap_([0-9a-z]+)$/.exec(id);
+    const at = match ? Number.parseInt(match[1]!, 36) : 0;
+    return { id, at: Number.isFinite(at) ? at : 0, agents: 0, projects: 0, archives: 0 };
+  });
 }
 
 /**
  * Restore an export. `merge` keeps what is already here and adds/overwrites by
- * id; `replace` deletes the office collections first. Room boards are never
- * restored: they are live meeting state owned by the room layer, and writing
- * them from a backup would rewrite history that other seats still poll.
+ * id; `replace` deletes the office collections first.
+ *
+ * The file is checked before anything is touched: shape, version and digest. A
+ * dry run returns the same verdict and counts without a single write, so the
+ * dashboard can show what a restore would do before the boss commits to it.
  */
 export async function importOffice(
   client: UpstashClient,
-  backup: Partial<OfficeBackup>,
+  backup: Partial<OfficeBackup> | Record<string, unknown>,
   mode: 'merge' | 'replace',
   now: number,
+  options: ImportOptions = {},
 ): Promise<RestoreResult> {
-  if (backup.format !== 'agent-room-office-backup') throw new Error('That file is not an office backup.');
-  const result: RestoreResult = { agents: 0, projects: 0, templates: 0, archives: 0, audit: 0, skipped: [] };
+  const validation = validateOfficeBackup(backup);
+  const result: RestoreResult = {
+    agents: 0, projects: 0, templates: 0, archives: 0, audit: 0,
+    skipped: [...validation.issues, ...validation.warnings],
+    checksum: validation.checksum.verdict,
+    ...(options.dryRun ? { dryRun: true } : {}),
+    ...(validation.issues.length ? { issues: validation.issues } : {}),
+    ...(validation.warnings.length ? { warnings: validation.warnings } : {}),
+  };
+  if (!validation.shapeOk) {
+    throw new OfficeBackupError(validation.issues.join(' '), 'backup_invalid', 400);
+  }
+  if (validation.checksum.verdict === 'mismatch' && !options.allowChecksumMismatch) {
+    throw new OfficeBackupError(
+      'The backup checksum does not match its contents. Export it again, or restore it deliberately with allowChecksumMismatch.',
+      'backup_checksum_mismatch',
+      409,
+    );
+  }
+
+  const tagged = backup as Partial<OfficeBackup>;
+  const planned = {
+    agents: (tagged.agents ?? []).filter(agent => Boolean(agent?.id && agent.name && agent.role)).length,
+    projects: (tagged.projects ?? []).filter(project => Boolean(project?.id && project.name)).length,
+    templates: (tagged.templates ?? []).filter(template => Boolean(template?.id && template.name && Array.isArray(template.tasks))).length,
+    archives: (tagged.archives ?? []).filter(archive => Boolean(archive?.id && archive.roomCode)).length,
+    audit: (tagged.audit ?? []).filter(entry => Boolean(entry && Number.isFinite(entry.at) && entry.action)).length,
+  };
+  if (options.dryRun) {
+    // A preview counts what WOULD be written. `skipped` still lists the shape
+    // warnings, so the boss sees both halves of the answer.
+    return { ...result, ...planned, skipped: result.skipped };
+  }
+
+  // Snapshot first: the restore that follows is the one action that can replace
+  // the whole office, so the state it replaced must be recoverable.
+  const actor = options.actor ?? 'owner';
+  const snapshot = await snapshotOffice(client, actor, now).catch(() => null);
+  if (snapshot) result.snapshotId = snapshot.id;
 
   if (mode === 'replace') {
     for (const [indexKey, entryKey] of [[AGENTS, agentKey], [PROJECTS, projectKey], [TEMPLATES, templateKey], [ARCHIVES, archiveKey]] as const) {
@@ -863,8 +1169,8 @@ export async function importOffice(
     await client.command(['DEL', AUDIT]);
   }
 
-  const agentIds = new Set((backup.agents ?? []).map(agent => agent.id));
-  for (const agent of backup.agents ?? []) {
+  const agentIds = new Set((tagged.agents ?? []).map(agent => agent.id));
+  for (const agent of tagged.agents ?? []) {
     if (!agent?.id || !agent.name || !agent.role) { result.skipped.push(`agent ${agent?.name ?? '(unnamed)'}`); continue; }
     if (mode === 'merge') {
       const existing = await findAgentByName(client, agent.name);
@@ -873,17 +1179,17 @@ export async function importOffice(
     await saveAgent(client, { ...agent, tags: agent.tags ?? [], updatedAt: now });
     result.agents += 1;
   }
-  for (const project of backup.projects ?? []) {
+  for (const project of tagged.projects ?? []) {
     if (!project?.id || !project.name) { result.skipped.push(`project ${project?.name ?? '(unnamed)'}`); continue; }
     await saveProject(client, { ...project, memory: project.memory ?? [], guidelines: project.guidelines ?? [], updatedAt: now });
     result.projects += 1;
   }
-  for (const template of backup.templates ?? []) {
+  for (const template of tagged.templates ?? []) {
     if (!template?.id || !template.name || !Array.isArray(template.tasks)) { result.skipped.push(`template ${template?.name ?? '(unnamed)'}`); continue; }
     await saveTemplate(client, { ...template, updatedAt: now });
     result.templates += 1;
   }
-  for (const archive of backup.archives ?? []) {
+  for (const archive of tagged.archives ?? []) {
     if (!archive?.id || !archive.roomCode) { result.skipped.push(`archive ${archive?.roomCode ?? '(no room)'}`); continue; }
     await writeJson(client, archiveKey(archive.id), archive);
     await client.pipeline([
@@ -892,12 +1198,12 @@ export async function importOffice(
     ]);
     result.archives += 1;
   }
-  const audit = (backup.audit ?? []).filter(entry => entry && Number.isFinite(entry.at) && entry.action);
+  const audit = (tagged.audit ?? []).filter(entry => entry && Number.isFinite(entry.at) && entry.action);
   if (audit.length) {
     await appendAudit(client, audit.slice(-OFFICE_AUDIT_RETENTION));
     result.audit = audit.length;
   }
-  if (backup.settings) await writeJson(client, SETTINGS, normalizeOfficeSettings(backup.settings));
+  if (tagged.settings) await writeJson(client, SETTINGS, normalizeOfficeSettings(tagged.settings));
   // A restored agent must still resolve by name after a rename in the export.
   for (const id of agentIds) {
     const agent = await getAgent(client, id);

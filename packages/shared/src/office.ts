@@ -12,6 +12,7 @@
 // in tests without a Redis or a clock of their own.
 
 import type { Message, Room, Task as RoomTask, TaskState } from './types.js';
+import { linkStateFor, type OfficeLinkState } from './linkRecovery.js';
 
 /**
  * Ids are generated without crypto so the same helper runs in the browser:
@@ -139,6 +140,15 @@ export interface OfficeAgentPresence {
   taskProgress?: number;
   /** The subtask tally `taskProgress` was read from, when the card has subtasks. */
   taskSubtasks?: { done: number; total: number };
+  /**
+   * How the link is behaving, next to the coarser `status` above.
+   *
+   * `status` answers "what is this seat doing"; this answers "is it still
+   * there, and since when". The dashboard shows the second as a line under the
+   * name — a seat that went quiet four minutes ago is drawn as offline by
+   * nothing at all, because presence only gives up at ten minutes.
+   */
+  link?: OfficeLinkState;
 }
 
 /**
@@ -199,6 +209,10 @@ export interface AgentActivity {
   active?: AgentTaskActivity[];
   /** Reviews waiting on this agent. */
   reviews?: AgentTaskActivity[];
+  /** Reconnections recorded for this seat in the retention window. */
+  reconnects?: number;
+  /** When work was last resumed after a reconnection. */
+  lastResumeAt?: number;
 }
 
 /** The presence fields that describe the card an agent is holding. */
@@ -223,31 +237,40 @@ function taskPresence(task: AgentTaskActivity, now: number): Pick<OfficeAgentPre
 export function agentPresence(agent: OfficeAgent, activity: AgentActivity, now: number): OfficeAgentPresence {
   const heartbeatAt = activity.heartbeatAt ?? agent.lastHeartbeatAt;
   const heartbeatAgeMs = heartbeatAt ? Math.max(0, now - heartbeatAt) : undefined;
+  // The link description travels with every presence, including the disabled
+  // and paused ones: "last heard from" is a fact about the connection, not a
+  // judgement about the seat's status.
+  const link = linkStateFor({
+    ...(heartbeatAt !== undefined ? { lastHealthyAt: heartbeatAt } : {}),
+    now,
+    ...(activity.reconnects !== undefined ? { reconnects: activity.reconnects } : {}),
+    ...(activity.lastResumeAt !== undefined ? { lastResumeAt: activity.lastResumeAt } : {}),
+  });
   if (!agent.enabled) {
-    return { status: 'offline', label: 'Disabled', ...(heartbeatAgeMs !== undefined ? { heartbeatAgeMs } : {}) };
+    return { status: 'offline', label: 'Disabled', ...(heartbeatAgeMs !== undefined ? { heartbeatAgeMs } : {}), link };
   }
   if (agent.paused) {
-    return { status: 'paused', label: 'Paused', ...(heartbeatAgeMs !== undefined ? { heartbeatAgeMs } : {}) };
+    return { status: 'paused', label: 'Paused', ...(heartbeatAgeMs !== undefined ? { heartbeatAgeMs } : {}), link };
   }
   const fresh = heartbeatAgeMs !== undefined && heartbeatAgeMs <= OFFICE_HEARTBEAT_STALE_MS;
   if (!fresh) {
-    return { status: 'offline', label: 'Offline', ...(heartbeatAgeMs !== undefined ? { heartbeatAgeMs } : {}) };
+    return { status: 'offline', label: 'Offline', ...(heartbeatAgeMs !== undefined ? { heartbeatAgeMs } : {}), link };
   }
   const review = activity.reviews?.[0];
   if (review) {
     return {
-      status: 'reviewing', label: 'Reviewing', heartbeatAgeMs,
+      status: 'reviewing', label: 'Reviewing', heartbeatAgeMs, link,
       taskId: review.id, roomCode: review.code, ...taskPresence(review, now),
     };
   }
   const active = activity.active?.[0];
   if (active) {
     return {
-      status: 'working', label: 'Working', heartbeatAgeMs,
+      status: 'working', label: 'Working', heartbeatAgeMs, link,
       taskId: active.id, roomCode: active.code, ...taskPresence(active, now),
     };
   }
-  return { status: 'idle', label: 'Available', heartbeatAgeMs };
+  return { status: 'idle', label: 'Available', heartbeatAgeMs, link };
 }
 
 export interface OfficeAgentView extends OfficeAgent {
@@ -529,6 +552,28 @@ export interface OfficeArchiveMessage {
   at: number;
 }
 
+/**
+ * One deliverable as the archive remembers it.
+ *
+ * The bytes live in private object storage under a prefix that room cleanup
+ * never touches, and their metadata record carries no TTL — so a deliverable
+ * outlives the room that produced it. This snapshot is what makes the *index*
+ * outlive the room too: after 30 days the room's own vault keys are gone, and
+ * the office still knows every file by id, size and producer.
+ */
+export interface OfficeArchiveFile {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  version: number;
+  producer?: string;
+  taskId?: string;
+  createdAt: number;
+  /** Storage key, so a later download does not depend on the room's vault keys. */
+  storageKey: string;
+}
+
 export interface OfficeArchive {
   id: string;                        // arc_xxxxxxxx
   roomCode: string;
@@ -544,6 +589,12 @@ export interface OfficeArchive {
   tasks: Array<{ id: string; title: string; state: string; owner?: string; verifier?: string }>;
   projectId?: string;
   tags: string[];
+  /** Deliverables produced in the room — kept after the room itself expires. */
+  deliverables?: OfficeArchiveFile[];
+  /** Materials were room-scoped working files; only their count is kept. */
+  materialCount?: number;
+  /** The room this one was handed over to, when it was. */
+  successorRoomCode?: string;
 }
 
 /** Compact, greppable minutes built from the transcript — no model call. */
@@ -776,6 +827,12 @@ export interface OfficeRoomSummary {
   openTasks: number;
   doneTasks: number;
   pendingApproval: number;
+  /** Three days or less left (and still open): the dashboard offers a handoff. */
+  handoffDue?: boolean;
+  /** Where this room's open work was carried, once it has been handed over. */
+  successorRoomCode?: string;
+  /** The room this one continues, if it was opened by a handoff. */
+  predecessorRoomCode?: string;
 }
 
 export interface OfficeIntegrations {

@@ -13,8 +13,11 @@ import {
   getRoom,
   joinRoom,
   getTaskBoard,
+  getOfficeRoomRecord,
+  listOfficeRoomRecords,
   listBoardRooms,
   listMessages,
+  listVaultFiles,
   archiveRoom,
   bumpAgentTask,
   findAgentForRoomName,
@@ -42,14 +45,17 @@ import {
   ROOM_TTL_SECONDS,
   agentPresence,
   filterAudit,
+  handoffUrgency,
   kstDay,
   officeBaseName,
+  redactSecretText,
   usageLevel,
 } from '@agent-room/shared';
 import type {
   AgentTaskActivity,
   OfficeAgent,
   OfficeAgentView,
+  OfficeArchiveFile,
   OfficeAuditEntry,
   OfficeOverview,
   OfficeRoomSummary,
@@ -220,7 +226,13 @@ export async function audit(
   action: string,
   fields: Omit<OfficeAuditEntry, 'id' | 'at' | 'actor' | 'action'> & { at?: number } = {},
 ): Promise<void> {
-  await appendAuditSafe(store, [auditEntry(actor, action, fields)]);
+  // Audit lines are written verbatim by callers that often quote an error or a
+  // user-supplied reason. A token pasted into a reason field, or a URL with
+  // credentials embedded in a provider's error, must not become permanent
+  // office history — so every detail crosses the same redaction the agent paths
+  // already use.
+  const detail = fields.detail === undefined ? undefined : redactSecretText(fields.detail);
+  await appendAuditSafe(store, [auditEntry(actor, action, { ...fields, ...(detail !== undefined ? { detail } : {}) })]);
 }
 
 /** Every room the office knows about: boards first, then the office registry. */
@@ -236,6 +248,32 @@ interface LoadedRoom {
   code: string;
   room?: Room;
   board?: TaskBoard;
+  successorRoomCode?: string;
+  predecessorRoomCode?: string;
+}
+
+/**
+ * Handoff links for the rooms that need one.
+ *
+ * Reading every room's office record would double the dashboard's read cost for
+ * information only two kinds of room show: an expiring one (where the handoff
+ * button lives) and one that already has a successor. So the record is read
+ * only for those, and the common room costs nothing.
+ */
+async function handoffLinks(
+  store: UpstashClient,
+  codes: string[],
+): Promise<Record<string, { successorRoomCode?: string; predecessorRoomCode?: string }>> {
+  const records = await listOfficeRoomRecords(store, codes).catch(() => ({} as Record<string, never>));
+  const out: Record<string, { successorRoomCode?: string; predecessorRoomCode?: string }> = {};
+  for (const [code, record] of Object.entries(records)) {
+    const link = {
+      ...(record.successorRoomCode ? { successorRoomCode: record.successorRoomCode } : {}),
+      ...(record.predecessorRoomCode ? { predecessorRoomCode: record.predecessorRoomCode } : {}),
+    };
+    if (Object.keys(link).length > 0) out[code] = link;
+  }
+  return out;
 }
 
 async function loadRooms(store: UpstashClient, codes: string[]): Promise<LoadedRoom[]> {
@@ -322,6 +360,7 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
   const loaded = options.withoutRooms ? [] : await loadRooms(store, codes);
   const heartbeats = await listHeartbeats(store, agents.map(agent => agent.name));
   const agentUsage = await readAgentUsage(store, day, agents.map(agent => agent.id));
+  const links = options.withoutRooms ? {} : await handoffLinks(store, loaded.map(({ code }) => code));
 
   const rooms: OfficeRoomSummary[] = [];
   const openTaskRefs: OfficeTaskRef[] = [];
@@ -404,6 +443,9 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
       openTasks: roomOpen,
       doneTasks: roomDone,
       pendingApproval: roomApprovals,
+      ...(handoffUrgency({ status: room.status, daysLeft }) === 'due' ? { handoffDue: true } : {}),
+      ...(links[code]?.successorRoomCode ? { successorRoomCode: links[code]!.successorRoomCode } : {}),
+      ...(links[code]?.predecessorRoomCode ? { predecessorRoomCode: links[code]!.predecessorRoomCode } : {}),
     });
   }
 
@@ -414,6 +456,8 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
       ...(heartbeat ? { heartbeatAt: heartbeat.at } : {}),
       active: ownedByAgent.get(key) ?? [],
       reviews: reviewsByAgent.get(key) ?? [],
+      ...(heartbeat?.reconnects !== undefined ? { reconnects: heartbeat.reconnects } : {}),
+      ...(heartbeat?.resumedAt !== undefined ? { lastResumeAt: heartbeat.resumedAt } : {}),
     }, now);
     const used = agentUsage[agent.id] ?? 0;
     return {
@@ -432,11 +476,22 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
   }
   if (agentViews.some(agent => !agent.enabled)) warnings.push('Some AI staff are disabled and will not receive work.');
   if (approvals.length) warnings.push(`${approvals.length} task${approvals.length === 1 ? '' : 's'} waiting for approval.`);
+  for (const agent of agentViews) {
+    // A seat that has gone quiet mid-task is the one case where 'offline' is
+    // not yet true but the work is already stuck. Say it while somebody can act.
+    if (agent.presence.link?.state !== 'recovering') continue;
+    if (!agent.presence.taskId) continue;
+    const minutes = Math.max(1, Math.round((agent.presence.link.downForMs ?? 0) / 60_000));
+    warnings.push(`${agent.name} has not been heard from for ${minutes} minute${minutes === 1 ? '' : 's'}; ${agent.presence.taskId} is held until it reconnects.`);
+  }
   for (const room of rooms) {
     if (room.status !== 'active' || room.daysLeft > ROOM_EXPIRING_DAYS) continue;
     warnings.push(room.daysLeft > 0
       ? `Room ${room.code} expires in ${room.daysLeft} day${room.daysLeft === 1 ? '' : 's'}.`
       : `Room ${room.code} has expired.`);
+    if (room.handoffDue && room.openTasks > 0 && !room.successorRoomCode) {
+      warnings.push(`Room ${room.code} expires in ${room.daysLeft} day${room.daysLeft === 1 ? '' : 's'} with ${room.openTasks} open task${room.openTasks === 1 ? '' : 's'} — hand the room over to keep them.`);
+    }
   }
 
   return {
@@ -516,17 +571,49 @@ export async function captureRoomArchive(
   code: string,
   actor: OfficeAuditEntry['actor'],
   now: number = Date.now(),
-): Promise<{ id: string; roomCode: string; topic: string; messageCount: number }> {
+): Promise<{ id: string; roomCode: string; topic: string; messageCount: number; deliverables: number }> {
   const room = await getRoom(store, code).catch(() => undefined);
   if (!room) throw new OfficeApiError(`No room ${code} to archive (rooms expire 30 days after creation).`, 404, 'room_not_found');
   const [messages, board] = await Promise.all([
     listMessages(store, code, 0).catch(() => []),
     getTaskBoard(store, code).catch(() => null),
   ]);
-  const archive = await archiveRoom(store, { room, messages, board, now });
+  // The archive is the thing that survives the room, so it is where the room's
+  // deliverables are indexed. Their bytes already live under a prefix room
+  // cleanup never touches and their records carry no TTL — but those records
+  // are room-scoped keys that disappear with the room. Snapshotting the
+  // metadata here is what keeps the files findable after day 30.
+  const [deliverables, materials, record] = await Promise.all([
+    listVaultFiles(store, 'deliverable', code).catch(() => []),
+    listVaultFiles(store, 'material', code).catch(() => []),
+    getOfficeRoomRecord(store, code).catch(() => null),
+  ]);
+  const files: OfficeArchiveFile[] = deliverables.map(file => ({
+    id: file.id,
+    name: file.name,
+    mime: file.mime,
+    size: file.size,
+    version: file.version,
+    createdAt: file.createdAt,
+    storageKey: file.storageKey,
+    ...(file.producer ? { producer: file.producer } : {}),
+    ...(file.taskId ? { taskId: file.taskId } : {}),
+  }));
+  const archive = await archiveRoom(store, {
+    room, messages, board, now,
+    ...(files.length ? { deliverables: files } : {}),
+    // Materials are room-scoped and expire with it; the count still belongs to
+    // the record of the meeting ("three inputs, two outputs").
+    ...(materials.length ? { materialCount: materials.length } : {}),
+    ...(record?.successorRoomCode ? { successorRoomCode: record.successorRoomCode } : {}),
+  });
   await registerOfficeRoom(store, code, { projectId: archive.projectId, at: now });
-  await audit(store, actor, 'meeting.archive', { target: archive.id, roomCode: code, detail: `${messages.length} messages`, at: now });
-  return { id: archive.id, roomCode: code, topic: room.topic, messageCount: messages.length };
+  await audit(store, actor, 'meeting.archive', {
+    target: archive.id, roomCode: code,
+    detail: `${messages.length} messages${files.length ? `, ${files.length} deliverables` : ''}`,
+    at: now,
+  });
+  return { id: archive.id, roomCode: code, topic: room.topic, messageCount: messages.length, deliverables: files.length };
 }
 
 /**
@@ -610,6 +697,7 @@ export async function seatAgents(
 export async function roomSummaries(store: UpstashClient, now: number = Date.now()): Promise<OfficeRoomSummary[]> {
   const codes = await knownRoomCodes(store);
   const loaded = await loadRooms(store, codes);
+  const links = await handoffLinks(store, loaded.map(({ code }) => code));
   const out: OfficeRoomSummary[] = [];
   for (const { code, room, board } of loaded) {
     if (!room) continue;
@@ -626,6 +714,9 @@ export async function roomSummaries(store: UpstashClient, now: number = Date.now
       openTasks: (board?.tasks ?? []).filter(isOpenTask).length,
       doneTasks: (board?.tasks ?? []).filter(task => task.state === 'done').length,
       pendingApproval: (board?.tasks ?? []).filter(task => task.state === 'pending_approval').length,
+      ...(handoffUrgency({ status: room.status, daysLeft }) === 'due' ? { handoffDue: true } : {}),
+      ...(links[code]?.successorRoomCode ? { successorRoomCode: links[code]!.successorRoomCode } : {}),
+      ...(links[code]?.predecessorRoomCode ? { predecessorRoomCode: links[code]!.predecessorRoomCode } : {}),
     });
   }
   return out.sort((a, b) => b.createdAt - a.createdAt);

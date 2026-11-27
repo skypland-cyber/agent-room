@@ -1,9 +1,12 @@
 // Limits and safekeeping: what the office has spent today, how each agent's
 // day is going, the free-tier ceiling it is measured against, and a JSON file
 // you can keep — or put back.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { OfficeOverview, OfficeSettings } from '@agent-room/shared';
-import { exportBackup, restoreBackup, saveSettings } from '../../lib/officeApi.js';
+import {
+  exportBackup, listBackupSnapshots, restoreBackup, saveSettings, verifyBackup,
+  type BackupSnapshotInfo, type BackupValidation,
+} from '../../lib/officeApi.js';
 import { Badge, Button, Card, ErrorNote, Field, Input, SectionTitle, useOfficeAction } from './ui.js';
 import { getLanguage, useI18n } from '../../i18n/index.js';
 import { message, usageNotesText } from '../../i18n/errors.js';
@@ -11,6 +14,13 @@ import { message, usageNotesText } from '../../i18n/errors.js';
 interface Props {
   overview: OfficeOverview;
   onChanged: () => void;
+}
+
+function formatStamp(at: number): string {
+  if (!at) return '—';
+  const date = new Date(at);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function Bar({ percent, level }: { percent: number; level: string }) {
@@ -29,7 +39,16 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
   const [restoreText, setRestoreText] = useState('');
   const [restoreMode, setRestoreMode] = useState<'merge' | 'replace'>('merge');
   const [notice, setNotice] = useState<string | null>(null);
+  const [preview, setPreview] = useState<BackupValidation | null>(null);
+  /** The exact text the preview was computed from: an edited file must be re-checked. */
+  const [previewedText, setPreviewedText] = useState('');
+  const [snapshots, setSnapshots] = useState<BackupSnapshotInfo[]>([]);
   const { busy, error, run } = useOfficeAction(onChanged);
+
+  const loadSnapshots = () => {
+    void listBackupSnapshots().then(setSnapshots).catch(() => setSnapshots([]));
+  };
+  useEffect(loadSnapshots, []);
 
   const save = () => void run('settings', async () => {
     await saveSettings(settings);
@@ -48,18 +67,49 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
     setNotice(t('limits.backup.downloaded'));
   });
 
-  const restore = () => void run('restore', async () => {
-    let parsed: unknown;
+  const parseRestore = (): unknown => {
     try {
-      parsed = JSON.parse(restoreText);
+      return JSON.parse(restoreText);
     } catch {
       throw message('limits.backup.badJson');
     }
+  };
+
+  /**
+   * Check the file without writing anything. The restore button stays disabled
+   * until this passes on the current text: the one action that can replace the
+   * whole office should never be one unverified paste away.
+   */
+  const check = () => void run('preview', async () => {
+    const parsed = parseRestore();
+    const result = await verifyBackup(parsed);
+    setPreview(result);
+    setPreviewedText(restoreText);
+    setNotice(null);
+  });
+
+  const restore = () => void run('restore', async () => {
+    const parsed = parseRestore();
     if (restoreMode === 'replace' && !window.confirm(t('limits.backup.replaceConfirm'))) return;
     const result = await restoreBackup(parsed, restoreMode);
-    setNotice(t('limits.backup.restored', { summary: JSON.stringify(result.restored) }));
+    const snapshotId = typeof result.restored.snapshotId === 'string' ? result.restored.snapshotId : '';
+    setNotice(
+      t('limits.backup.restored', { summary: JSON.stringify(result.restored) })
+      + (snapshotId ? t('limits.backup.snapshotTaken', { id: snapshotId }) : ''),
+    );
     setRestoreText('');
+    setPreview(null);
+    setPreviewedText('');
+    loadSnapshots();
+    onChanged();
   });
+
+  const previewStale = preview !== null && previewedText !== restoreText;
+  const checksumLabel = (verdict: string) => t(
+    verdict === 'verified' ? 'limits.backup.checksumVerified'
+      : verdict === 'missing' ? 'limits.backup.checksumMissing'
+        : 'limits.backup.checksumMismatch',
+  );
 
   const usage = overview.usage;
   const locale = getLanguage() === 'ko' ? 'ko-KR' : 'en-GB';
@@ -171,8 +221,41 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
                   onChange={event => setRestoreMode(event.target.checked ? 'replace' : 'merge')} />
                 {t('limits.backup.replaceAll')}
               </label>
-              <Button variant="ghost" onClick={restore} disabled={busy !== null || !restoreText.trim()}>{t('limits.backup.restore')}</Button>
+              <Button variant="ghost" onClick={check} disabled={busy !== null || !restoreText.trim()}>
+                {busy === 'preview' ? t('limits.backup.previewing') : t('limits.backup.preview')}
+              </Button>
+              <Button onClick={restore}
+                disabled={busy !== null || !restoreText.trim() || !preview?.ok || previewStale}>
+                {t('limits.backup.restore')}
+              </Button>
             </div>
+            {preview ? (
+              <div className={`rounded-lg border px-3 py-2 text-[11px] leading-relaxed ${
+                preview.ok ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-rose-200 bg-rose-50 text-rose-900'
+              }`}>
+                <p className="font-semibold">
+                  {preview.ok
+                    ? t('limits.backup.previewOk', { ...preview.summary })
+                    : t('limits.backup.previewIssues', {
+                      issues: preview.issues.join(' ') || checksumLabel(preview.checksum.verdict),
+                    })}
+                </p>
+                <p className="mt-0.5">{t('limits.backup.checksum', { verdict: checksumLabel(preview.checksum.verdict) })}</p>
+                {preview.warnings.length > 0 ? (
+                  <p className="mt-0.5">{t('limits.backup.previewWarnings', { warnings: preview.warnings.join(' ') })}</p>
+                ) : null}
+                {previewStale ? <p className="mt-0.5 font-semibold">{t('limits.backup.stale')}</p> : null}
+              </div>
+            ) : (
+              <p className="text-[11px] text-ink-faint">{t('limits.backup.needPreview')}</p>
+            )}
+            <p className="text-[11px] text-ink-faint">{t('limits.backup.snapshotNote')}</p>
+            {snapshots.length > 0 ? (
+              <div className="text-[11px] text-ink-faint">
+                <span className="font-semibold text-ink-muted">{t('limits.backup.snapshots')}</span>
+                <span className="ml-1 font-mono">{snapshots.slice(0, 3).map(snapshot => formatStamp(snapshot.at)).join(' · ')}</span>
+              </div>
+            ) : null}
           </div>
         </Card>
       </div>

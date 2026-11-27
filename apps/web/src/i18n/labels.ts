@@ -37,6 +37,13 @@ const ROOM_STATUS_KEYS: Record<string, MessageKey> = {
   ended: 'roomStatus.ended',
 };
 
+/** The link states the office reports next to a seat's presence. */
+const LINK_KEYS: Record<string, MessageKey> = {
+  grace: 'staff.link.grace',
+  recovering: 'staff.link.recovering',
+  offline: 'staff.link.offline',
+};
+
 /** 'pending_approval' → '승인 대기'. Unknown states pass through untouched. */
 export function taskStateLabel(state: string): string {
   const key = TASK_STATE_KEYS[state];
@@ -62,6 +69,18 @@ export function qaStatusLabel(status: string): string {
 export function roomStatusLabel(status: string): string {
   const key = ROOM_STATUS_KEYS[status];
   return key ? t(key) : status;
+}
+
+/**
+ * A seat's link state, but only when it is worth saying.
+ *
+ * `live` and `unknown` return '' — a connected seat needs no badge, and the
+ * presence badge beside it already says what it is doing. The two quiet states
+ * are the ones a person acts on, so only those get words.
+ */
+export function linkStateLabel(state: string | undefined): string {
+  const key = state ? LINK_KEYS[state] : undefined;
+  return key ? t(key) : '';
 }
 
 /** The compact "1 working · 1 reviewing" legend under the floor title. */export function presenceCounts(counts: Map<string, number>): string {
@@ -97,6 +116,7 @@ const AUDIT_PREFIX_KEYS: Record<string, MessageKey> = {
 const AUDIT_NOUN_KEYS: Record<string, MessageKey> = {
   memory: 'audit.noun.memory',
   guideline: 'audit.noun.guideline',
+  link: 'audit.noun.link',
 };
 
 const AUDIT_VERB_KEYS: Record<string, MessageKey> = {
