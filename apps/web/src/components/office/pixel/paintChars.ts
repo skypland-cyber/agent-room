@@ -7,6 +7,7 @@
 // be derived from its name instead of shipped as an asset.
 import type { DeskSlot } from './officeMap.js';
 import { DESK_H, DESK_W, TILE } from './officeMap.js';
+import type { BubblePlacement } from './bubbleLayout.js';
 import type { Palette } from './palette.js';
 import type { BubbleTone, ScenePose } from './scene.js';
 
@@ -215,27 +216,33 @@ const BUBBLE_TONE: Record<BubbleTone, { border: string; text: string; fill: stri
 };
 
 /** A pixel speech bubble with its tail a few pixels above the speaker's head. */
-export function drawBubble(ctx: CanvasRenderingContext2D, centerX: number, bottomY: number, text: string, tone: BubbleTone): void {
+export const BUBBLE_FONT = 'bold 8px ui-monospace, SFMono-Regular, monospace';
+
+/**
+ * Paint a bubble where `layoutBubbles` decided it goes. `layout` is what kept it off
+ * its neighbours and inside the map; this only fills in the box. A bubble pushed up
+ * to make room hangs a 1 px stem back down to the speaker so it still reads as his.
+ */
+export function drawBubbleAt(ctx: CanvasRenderingContext2D, layout: BubblePlacement, text: string, tone: BubbleTone): void {
   const palette = BUBBLE_TONE[tone];
-  ctx.save();
-  ctx.font = 'bold 8px ui-monospace, SFMono-Regular, monospace';
-  const width = Math.min(96, Math.ceil(ctx.measureText(text).width) + 10);
-  const height = 13;
-  const left = Math.round(centerX - width / 2);
-  const top = Math.round(bottomY - height);
+  const { left, top, width, height, tailX, anchorY } = layout;
+  const bottom = top + height;
+  if (anchorY > bottom + 2) box(ctx, tailX, bottom, 1, anchorY - bottom, palette.border);
   box(ctx, left + 1, top, width - 2, height, palette.border);
   box(ctx, left, top + 2, width, height - 4, palette.border);
   box(ctx, left + 1, top + 1, width - 2, height - 2, palette.fill);
-  box(ctx, Math.round(centerX) - 2, top + height, 4, 2, palette.border);
-  box(ctx, Math.round(centerX) - 1, top + height, 2, 1, palette.fill);
+  box(ctx, tailX - 2, bottom, 4, 2, palette.border);
+  box(ctx, tailX - 1, bottom, 2, 1, palette.fill);
+  ctx.save();
+  ctx.font = BUBBLE_FONT;
   ctx.fillStyle = palette.text;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(text, Math.round(centerX), top + height / 2 + 0.5, width - 6);
+  ctx.fillText(text, Math.round(left + width / 2), Math.round(bottom - height / 2) + 0.5, width - 6);
   ctx.restore();
 }
 
-/** Small name chip above a head. */
+/** The name chip just above a head: the bubble sits above this, not on it. */
 export function drawNameTag(ctx: CanvasRenderingContext2D, centerX: number, bottomY: number, name: string, accent?: string): void {
   ctx.save();
   ctx.font = 'bold 7px ui-monospace, SFMono-Regular, monospace';

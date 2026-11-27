@@ -355,6 +355,18 @@ export const ko = {
   'pixel.bubble.free': '대기',
   'pixel.bubble.reviewing': '검수 중',
   'pixel.bubble.reviewTask': '{id} 검수',
+  // 휴식 중에 오가는 짧은 수다 — 말풍선 폭이 좁아 한 줄에 열두 자 안쪽으로 씁니다.
+  'pixel.chat.coffee': '커피 한 잔 ☕',
+  'pixel.chat.waiting': '다음 업무 대기 중~',
+  'pixel.chat.goodDay': '오늘 일 잘 풀리네요',
+  'pixel.chat.stretch': '잠깐 스트레칭!',
+  'pixel.chat.snack': '간식 뭐 있나~',
+  'pixel.chat.ask.weekend': '주말에 뭐 하세요?',
+  'pixel.chat.answer.weekend': '집에서 푹 쉬려고요~',
+  'pixel.chat.ask.coffee': '여기 커피 괜찮네요',
+  'pixel.chat.answer.coffee': '제가 내렸어요 ㅋㅋ',
+  'pixel.chat.ask.lunch': '점심 뭐 먹을까요?',
+  'pixel.chat.answer.lunch': '김치찌개 어때요?',
 
   // ── character sheet ─────────────────────────────────────────────────────
   'agent.aria': '{name} 상세',
