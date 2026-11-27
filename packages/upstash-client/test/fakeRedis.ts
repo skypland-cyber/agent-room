@@ -110,11 +110,42 @@ function run(fake: FakeRedis, cmd: unknown[]): unknown {
     case 'SET': store.set(key, String(cmd[2])); return 'OK';
     case 'DEL': return cmd.slice(1).reduce<number>((n, k) => n + (store.delete(String(k)) ? 1 : 0), 0);
     case 'RPUSH': { const l = list(store, key); l.push(...cmd.slice(2).map(String)); return l.length; }
+    case 'LPUSH': { const l = list(store, key); l.unshift(...cmd.slice(2).map(String)); return l.length; }
+    case 'RPOP': {
+      const l = Array.isArray(store.get(key)) ? store.get(key) as string[] : [];
+      const value = l.pop();
+      return value === undefined ? null : value;
+    }
+    case 'LPOP': {
+      const l = Array.isArray(store.get(key)) ? store.get(key) as string[] : [];
+      const value = l.shift();
+      return value === undefined ? null : value;
+    }
+    case 'LREM': {
+      const l = Array.isArray(store.get(key)) ? store.get(key) as string[] : [];
+      const count = Number(cmd[2]);
+      const value = String(cmd[3]);
+      const limit = count === 0 ? Infinity : Math.abs(count);
+      let removed = 0;
+      if (count >= 0) {
+        for (let i = 0; i < l.length && removed < limit;) {
+          if (l[i] === value) { l.splice(i, 1); removed += 1; } else i += 1;
+        }
+      } else {
+        for (let i = l.length - 1; i >= 0 && removed < limit; i -= 1) {
+          if (l[i] === value) { l.splice(i, 1); removed += 1; }
+        }
+      }
+      return removed;
+    }
     case 'INCR': { const n = Number(str(store, key) ?? '0') + 1; store.set(key, String(n)); return n; }
     case 'LTRIM': {
-      const l = list(store, key);
+      const l = Array.isArray(store.get(key)) ? store.get(key) as string[] : [];
       const start = Number(cmd[2]);
-      if (start < 0 && l.length > -start) l.splice(0, l.length + start);
+      const stop = Number(cmd[3]);
+      const from = start < 0 ? Math.max(0, l.length + start) : start;
+      const to = stop < 0 ? l.length + stop : stop;
+      store.set(key, from > to ? [] : l.slice(from, to + 1));
       return 'OK';
     }
     case 'LLEN': return Array.isArray(store.get(key)) ? (store.get(key) as string[]).length : 0;

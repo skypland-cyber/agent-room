@@ -43,7 +43,14 @@ export const NOTION_MAX_RETRIES = 2;
 /** A serverless request cannot sit out a 60 second rate limit and still answer. */
 export const NOTION_MAX_RETRY_WAIT_MS = 10_000;
 
-export type NotionSyncMode = 'off' | 'meta' | 'full';
+/**
+ * How much of the sync is live.
+ *
+ * `off` and `read` never write (and never queue); `meta` writes meeting rows
+ * only; `full` writes everything. `write` and `all` are accepted as aliases of
+ * `full` because that is what they mean to whoever is typing the variable.
+ */
+export type NotionSyncMode = 'off' | 'read' | 'meta' | 'full';
 export type NotionMinutesMode = 'property' | 'body' | 'none';
 
 /** The shape the SDK client takes for `fetch`; tests inject a fake one. */
@@ -135,7 +142,13 @@ export function notionConfig(env: NodeJS.ProcessEnv = process.env): NotionConfig
   if (!apiKey) missing.push('NOTION_API_KEY');
   if (!rootPageId) missing.push('NOTION_ROOT_PAGE_ID');
   const syncModeRaw = text(env.NOTION_SYNC_MODE).toLowerCase();
-  const syncMode: NotionSyncMode = syncModeRaw === 'meta' || syncModeRaw === 'full' ? syncModeRaw : 'off';
+  const syncMode: NotionSyncMode = syncModeRaw === 'read'
+    ? 'read'
+    : syncModeRaw === 'meta'
+      ? 'meta'
+      : syncModeRaw === 'full' || syncModeRaw === 'write' || syncModeRaw === 'all'
+        ? 'full'
+        : 'off';
   const minutesModeRaw = text(env.NOTION_MINUTES_MODE).toLowerCase();
   const minutesMode: NotionMinutesMode =
     minutesModeRaw === 'body' || minutesModeRaw === 'none' ? minutesModeRaw : 'property';
@@ -162,6 +175,8 @@ export function notionConfig(env: NodeJS.ProcessEnv = process.env): NotionConfig
 
 export type NotionErrorCode =
   | 'notion_not_configured'
+  /** The databases exist in no schema cache yet — someone has to bootstrap. */
+  | 'notion_not_bootstrapped'
   | 'notion_forbidden'
   | 'notion_block_limit'
   | 'notion_rate_limited'
@@ -394,6 +409,10 @@ export interface NotionClient {
   retrievePageMarkdown(id: string): Promise<NotionPageMarkdown>;
   listBlockChildren(id: string, pageSize?: number): Promise<NotionBlockList>;
   appendBlockChildren(id: string, children: Array<Record<string, unknown>>): Promise<NotionBlockList>;
+  /** Create one row in a data source (`parent.data_source_id`). */
+  createPage(dataSourceId: string, properties: Record<string, unknown>): Promise<NotionPage>;
+  /** Update one row's properties. Never moves, never deletes a block. */
+  updatePage(id: string, properties: Record<string, unknown>): Promise<NotionPage>;
   createDatabase(body: Record<string, unknown>): Promise<NotionDatabase>;
   retrieveDatabase(id: string): Promise<NotionDatabase>;
   retrieveDataSource(id: string): Promise<NotionDataSource>;
@@ -551,6 +570,23 @@ export function createNotionClient(options: NotionClientOptions = {}): NotionCli
         path: `blocks/${encodeURIComponent(id)}/children`,
         method: 'PATCH',
         body: { children },
+      });
+    },
+    async createPage(dataSourceId, properties) {
+      return request<NotionPage>({
+        path: 'pages',
+        method: 'POST',
+        body: {
+          parent: { type: 'data_source_id', data_source_id: dataSourceId },
+          properties,
+        },
+      });
+    },
+    async updatePage(id, properties) {
+      return request<NotionPage>({
+        path: `pages/${encodeURIComponent(id)}`,
+        method: 'PATCH',
+        body: { properties },
       });
     },
     async createDatabase(body) {

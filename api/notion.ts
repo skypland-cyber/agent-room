@@ -2,7 +2,8 @@
 //
 //   GET  /api/notion                    → `status`
 //   GET  /api/notion?action=selftest    → read-only verification
-//   POST /api/notion { action }         → status | bootstrap | selftest | repair
+//   POST /api/notion { action }         → status | bootstrap | selftest | repair |
+//                                         drain | backfill
 //
 // One function, one `action` field, exactly like `api/office.ts`: the free plan
 // gives this project a small number of Serverless Functions and the repository
@@ -26,6 +27,14 @@ import {
   type NotionConfig,
 } from './_notion/client.js';
 import { NOTION_DATABASES, bootstrapNotion, loadNotionSchema, repairNotion, selftestNotion } from './_notion/schema.js';
+import {
+  BACKFILL_KINDS,
+  backfillNotion,
+  drainOutboxNow,
+  runEvent,
+  syncStatus,
+  type BackfillKind,
+} from './_notion/sync.js';
 
 export const maxDuration = 60;
 
@@ -45,6 +54,10 @@ const CALL_BUDGET = {
   bootstrap: 80,
   selftest: 40,
   repair: 80,
+  /** Twenty queued rows × (a key lookup + a write). */
+  drain: 120,
+  /** Backfill keeps its own ceiling inside `backfillNotion`. */
+  backfill: 200,
 } as const;
 
 function str(value: unknown, max = 500): string {
@@ -157,12 +170,14 @@ async function handleStatus(req: VercelRequest, res: VercelResponse, store: Stor
       fulltext: config.minutesFulltext,
       maxChars: config.minutesMaxChars,
     },
-    actions: ['status', 'bootstrap', 'selftest', 'repair'],
+    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill'],
   };
   if (!auth.configured) payload.setup = setupInstructions(auth);
   if (session) {
     payload.schema = await schemaSummary(store, normalizeNotionId(process.env.NOTION_ROOT_PAGE_ID), Date.now());
     payload.integrations = { redis: Boolean(store), notion: config.configured };
+    // Queue depth is Redis-only; the dashboard card must never cost a call.
+    if (store) payload.sync = await syncStatus(store).catch(() => null);
   }
   send(res, 200, payload);
 }
@@ -181,11 +196,24 @@ async function handleBootstrap(req: VercelRequest, res: VercelResponse, store: S
     store,
     rootPageId: normalizeNotionId(process.env.NOTION_ROOT_PAGE_ID) as string,
   });
+  // Phase 1 deferred row seeding because idempotency did not exist yet; it does
+  // now, so bootstrap finishes its job: one manual row per AI staff member.
+  // Only in `full` — `meta` is explicitly meetings-only and `off` writes nothing.
+  const seed = config.syncMode === 'full'
+    ? await runEvent(store, { kind: 'staff.seed' }, { config }).catch(error => ({
+      ok: false as const,
+      kind: 'staff.seed' as const,
+      action: 'skipped' as const,
+      reason: error instanceof Error ? error.message : 'seed failed',
+      calls: 0,
+    }))
+    : null;
   await audit(store, OWNER, 'notion.bootstrap', {
     detail: `${result.created.length} created · ${result.reused.length} reused · ${result.patched.length} properties added`
-      + `${result.inlineFallback.length ? ` · ${result.inlineFallback.length} as child pages` : ''}`,
+      + `${result.inlineFallback.length ? ` · ${result.inlineFallback.length} as child pages` : ''}`
+      + `${seed ? ` · staff seed ${seed.ok ? (seed.action ?? 'ok') : 'failed'}` : ' · staff seed skipped (mode)'}`,
   });
-  send(res, 200, result);
+  send(res, 200, { ...result, staffSeed: seed });
 }
 
 async function handleSelftest(res: VercelResponse, store: Store): Promise<void> {
@@ -219,12 +247,66 @@ async function handleRepair(req: VercelRequest, res: VercelResponse, store: Stor
     store,
     rootPageId: normalizeNotionId(process.env.NOTION_ROOT_PAGE_ID) as string,
   });
+  // `relink: true` also puts back the Redis links for rows that already exist in
+  // Notion — the half of a repair the schema cannot see (a flushed Redis leaves
+  // every row in place and every link gone).
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const relink = body.relink === true && config.syncMode !== 'off' && config.syncMode !== 'read'
+    ? await backfillNotion({ store, config, relink: true, limit: 200 }).catch(error => ({
+      ok: false,
+      relinked: 0,
+      processed: 0,
+      error: error instanceof Error ? error.message : 'relink failed',
+    }))
+    : null;
   await audit(store, OWNER, 'notion.repair', {
     detail: result.missing.length
       ? `${result.missing.length} missing: ${result.missing.join(', ')}`
-      : `${result.repaired.length} databases checked · ${result.calls.calls} calls`,
+      : `${result.repaired.length} databases checked · ${result.calls.calls} calls`
+        + `${relink && 'relinked' in relink ? ` · ${relink.relinked} links restored` : ''}`,
   });
-  send(res, 200, result);
+  send(res, 200, { ...result, ...(relink ? { relink } : {}) });
+}
+
+/** `drain`: write what the outbox kept while Notion was unavailable. */
+async function handleDrain(req: VercelRequest, res: VercelResponse, store: Store): Promise<void> {
+  const config = notionConfig();
+  requireNotion(config);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const limit = Math.max(1, Math.min(20, Math.round(Number(body.limit) || 20)));
+  if (!await withinRateLimit(store, `notion-drain:${digest(clientIp(req))}`, 10)) {
+    res.setHeader('Retry-After', '60');
+    send(res, 429, { error: 'rate_limited', message: 'Too many drains in a minute. Wait a moment.' });
+    return;
+  }
+  const report = await drainOutboxNow(store, { limit, config });
+  await audit(store, OWNER, 'notion.drain', {
+    detail: `${report.processed} processed · ${report.succeeded} written · ${report.failed} waiting · ${report.dead} dead`,
+  });
+  send(res, 200, { ok: report.failed === 0 && report.dead === 0, mode: config.syncMode, ...report });
+}
+
+/** `backfill`: write what Redis already holds — resumable with `cursor`. */
+async function handleBackfill(req: VercelRequest, res: VercelResponse, store: Store): Promise<void> {
+  const config = notionConfig();
+  requireNotion(config);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const kinds = Array.isArray(body.kinds)
+    ? body.kinds.filter((kind): kind is BackfillKind => typeof kind === 'string' && BACKFILL_KINDS.includes(kind as BackfillKind))
+    : undefined;
+  const limit = Math.max(1, Math.min(200, Math.round(Number(body.limit) || 10)));
+  const cursor = typeof body.cursor === 'string' && body.cursor.trim() ? body.cursor.trim() : null;
+  if (!await withinRateLimit(store, `notion-backfill:${digest(clientIp(req))}`, 6)) {
+    res.setHeader('Retry-After', '60');
+    send(res, 429, { error: 'rate_limited', message: 'Too many backfills in a minute. Wait a moment.' });
+    return;
+  }
+  const result = await backfillNotion({ store, config, ...(kinds ? { kinds } : {}), limit, cursor });
+  await audit(store, OWNER, 'notion.backfill', {
+    detail: `${result.processed} rows · ${result.created} created · ${result.updated} updated`
+      + `${result.failed ? ` · ${result.failed} failed` : ''}${result.nextCursor ? ` · next ${result.nextCursor}` : ''}`,
+  });
+  send(res, 200, { mode: config.syncMode, ...result });
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
@@ -275,6 +357,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     if (action === 'bootstrap') { await handleBootstrap(req, res, store); return; }
     if (action === 'repair') { await handleRepair(req, res, store); return; }
+    if (action === 'drain') { await handleDrain(req, res, store); return; }
+    if (action === 'backfill') { await handleBackfill(req, res, store); return; }
 
     throw new NotionError(`Unknown Notion action "${action}".`, 'notion_invalid_request', 400);
   } catch (error) {

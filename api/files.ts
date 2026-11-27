@@ -39,6 +39,7 @@ import {
 } from './_vault.js';
 import { blobStoreFailed, createBlobStore, vaultStorageKey } from './_blobStore.js';
 import { audit } from './_office.js';
+import { syncEvent } from './_notion/sync.js';
 
 export const config = { api: { bodyParser: false }, maxDuration: 60 };
 
@@ -204,6 +205,9 @@ async function handleMultipartUpload(req: VercelRequest, res: VercelResponse): P
       ...(fieldValue(parts, 'description') ? { description: fieldValue(parts, 'description') } : {}),
       maxBytes: VAULT_INLINE_MAX_BYTES,
     });
+    // A new version of a deliverable is the same row, revised — the event carries
+    // the whole file so the row's size, version and date all move together.
+    if (file.kind === 'deliverable') syncEvent(store, { kind: 'deliverable.upsert', file });
     const usage = await vaultUsage(store, roomCode);
     res.status(201).json({ file: withLinks(file), usage });
     return;
@@ -227,6 +231,7 @@ async function handleMultipartUpload(req: VercelRequest, res: VercelResponse): P
   const usage = await vaultUsage(store, roomCode);
   const status = result.files.length > 0 ? 201 : 400;
   for (const file of result.files) {
+    if (file.kind === 'deliverable') syncEvent(store, { kind: 'deliverable.upsert', file });
     await audit(store, { name: principal.name, kind: principal.isHost ? 'host' : principal.client === 'cc' ? 'agent' : 'owner' }, 'file.upload', {
       target: file.id, roomCode, detail: `${file.kind}/${file.name}`,
     });
@@ -386,6 +391,11 @@ async function handleAction(body: Record<string, unknown>, req: VercelRequest, r
         return;
       }
       await deleteVaultFileWithObjects({ store, blob: blob.store }, roomCode, file.kind, file.id);
+      if (file.kind === 'deliverable') {
+        // The row stays: a deliverable that was deleted is still part of the
+        // record, marked 보존=삭제됨 so a person does not chase a dead link.
+        syncEvent(store, { kind: 'deliverable.deleted', fileId: file.id, roomCode, name: file.name });
+      }
       await audit(store, { name: principal.name, kind: principal.isHost ? 'host' : principal.client === 'cc' ? 'agent' : 'owner' }, 'file.delete', {
         target: file.id, roomCode, detail: `${file.kind}/${file.name}`,
       });
@@ -483,6 +493,9 @@ async function handleAction(body: Record<string, unknown>, req: VercelRequest, r
       if (result.files.length === 0) {
         res.status(400).json({ error: 'upload_failed', failures: result.failures });
         return;
+      }
+      if (result.files[0]!.kind === 'deliverable') {
+        syncEvent(store, { kind: 'deliverable.upsert', file: result.files[0]! });
       }
       res.status(201).json({ file: withLinks(result.files[0]!), usage: await vaultUsage(store, roomCode) });
       return;

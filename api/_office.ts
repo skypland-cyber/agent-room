@@ -55,6 +55,7 @@ import type {
   AgentTaskActivity,
   OfficeAgent,
   OfficeAgentView,
+  OfficeArchive,
   OfficeArchiveFile,
   OfficeAuditEntry,
   OfficeOverview,
@@ -613,7 +614,29 @@ export async function captureRoomArchive(
     detail: `${messages.length} messages${files.length ? `, ${files.length} deliverables` : ''}`,
     at: now,
   });
+  // The four call sites that archive a room (MCP `room_end`, HTTP room end, the
+  // dashboard's `rooms.end` and `archives.capture`) all pass through here, so
+  // this is the one place a meeting row has to be announced. It returns at once;
+  // the write happens in the background and a failure is kept in the outbox.
+  announceMeetingArchived(store, archive, now);
   return { id: archive.id, roomCode: code, topic: room.topic, messageCount: messages.length, deliverables: files.length };
+}
+
+/**
+ * Announce a finished meeting to the Notion sync.
+ *
+ * Imported lazily on purpose: `api/room.ts` and `api/mcp.ts` load this module,
+ * and neither should carry the Notion SDK on a cold start just because a room
+ * might end. The import happens when a room actually does, and its failure is
+ * swallowed — an archive that succeeded must not be reported as failed because
+ * a background copy could not be scheduled.
+ */
+function announceMeetingArchived(store: UpstashClient, archive: OfficeArchive, now: number): void {
+  void import('./_notion/sync.js')
+    .then(module => {
+      module.syncEvent(store, { kind: 'meeting.archived', archive }, { now });
+    })
+    .catch(() => undefined);
 }
 
 /**
