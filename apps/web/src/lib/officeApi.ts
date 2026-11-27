@@ -69,7 +69,17 @@ export const officeLogin = (password: string) =>
 
 export const officeLogout = () => request<{ authenticated: boolean }>('logout');
 
-export const officeOverview = (options: { withoutRooms?: boolean } = {}) =>
+/**
+ * The dashboard.
+ *
+ * `freshness` is what the server's cache is told to do, and it follows what
+ * asked for the data: the poll passes `cached` (a cached reply is a single read
+ * and the screen refreshes minutes apart anyway), while the manual refresh, the
+ * first load after signing in and the refresh after a change pass `fresh` so the
+ * boss never waits out a cached copy on purpose. Leaving it out keeps the old
+ * behaviour — `fresh` — for any client that does not know about the cache.
+ */
+export const officeOverview = (options: { withoutRooms?: boolean; freshness?: 'cached' | 'fresh' } = {}) =>
   request<{ overview: OfficeOverview }>('overview', options).then(payload => payload.overview);
 
 export const listAgents = () => request<{ agents: OfficeAgent[] }>('agents.list').then(payload => payload.agents);

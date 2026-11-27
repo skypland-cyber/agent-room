@@ -382,6 +382,11 @@ export const ko = {
   'pixel.bubble.free': '대기',
   'pixel.bubble.reviewing': '검수 중',
   'pixel.bubble.reviewTask': '{id} 검수',
+  'pixel.bubble.taskLine': '{id} · {title}',
+  'pixel.bubble.stateWorking': '작업 중',
+  'pixel.bubble.stateReviewing': '검토 대기',
+  'pixel.bubble.subtasks': '{done}/{total}',
+  'pixel.bubble.leaseSoon': '곧 만료 {minutes}분',
   // 휴식 중에 오가는 짧은 수다 — 말풍선 폭이 좁아 한 줄에 열두 자 안쪽으로 씁니다.
   // 일반(어느 자리에서든) → 탕비실 → 라운지 순서이고, 실제 직장인들이 나눌 법한 말로 채웁니다.
   'pixel.chat.coffee': '커피 한 잔 ☕',

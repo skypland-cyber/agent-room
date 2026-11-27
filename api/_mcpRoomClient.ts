@@ -1,3 +1,4 @@
+import { invalidateOfficeOverview } from './_office.js';
 import { findSeat } from './_roomAccess.js';
 import { generateCode } from '@agent-room/shared';
 import type { Message, Participant, Room, RoomReport } from '@agent-room/shared';
@@ -148,9 +149,20 @@ async function readBoard(store: UpstashClient, code: string) {
   return getTaskBoard(store, code);
 }
 
-/** Every task write is followed by notification publication. */
+/**
+ * Every task write is followed by notification publication and a dropped
+ * dashboard cache.
+ *
+ * The office dashboard caches its payload for under two minutes, and an agent
+ * claiming, submitting or verifying a card is what the floor is supposed to show
+ * happening. Dropping the cache here — the one place every MCP task write goes
+ * through — means the next dashboard poll sees the change instead of waiting out
+ * the TTL. One DEL, after the write has landed; a failure to drop it only costs
+ * that wait.
+ */
 async function afterTaskWrite<T>(store: UpstashClient, code: string, result: T): Promise<T> {
   await publishBoardNotifications(store, code);
+  await invalidateOfficeOverview(store);
   return result;
 }
 

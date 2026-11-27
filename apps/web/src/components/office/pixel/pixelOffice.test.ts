@@ -22,7 +22,14 @@ import {
   zoneAt,
 } from './officeMap.js';
 import { buildOfficeGrid, findPath, isOpen, nearestOpen, simplifyPath } from './pathfind.js';
-import { approvalTasksFor, openTasksFor, planScenes } from './scene.js';
+import {
+  BUBBLE_TITLE_MAX,
+  approvalTasksFor,
+  openTasksFor,
+  planScenes,
+  taskBubble,
+  taskBubbleTone,
+} from './scene.js';
 import { paletteFor } from './palette.js';
 
 const now = 1_800_000_000_000;
@@ -270,6 +277,98 @@ describe('what each agent is doing', () => {
     expect(openTasksFor(agents[0]!, payload).map(row => row.id)).toEqual(['T-01']);
     expect(approvalTasksFor(agents[1]!, payload).map(row => row.id)).toEqual(['T-02']);
     expect(planScenes(agents, payload).map(scene => scene.zone)).toEqual(['desk', 'ceo']);
+  });
+});
+
+describe('the line over a working head', () => {
+  const working = (presence: Partial<OfficeAgentView['presence']>) => ({
+    status: 'working' as const, label: 'Working', taskId: 'T-16', ...presence,
+  });
+
+  it('names the card, its state and how far along it is', () => {
+    const line = taskBubble(working({
+      taskTitle: '응답 캐시', taskState: 'in_progress', taskProgress: 50,
+    }), 'working', now);
+    const [head, state] = line.split('\n');
+    expect(head).toBe('T-16 · 응답 캐시');
+    // The board's own word for the state, not a second vocabulary for the floor.
+    expect(state).toContain('진행 중');
+    expect(state).toContain('50%');
+  });
+
+  it('shows the subtask tally instead of a share when the card has a breakdown', () => {
+    const line = taskBubble(working({
+      taskTitle: '말풍선', taskState: 'awaiting_review', taskProgress: 50, taskSubtasks: { done: 2, total: 4 },
+    }), 'working', now);
+    expect(line).toContain('2/4');
+    // The card's own state outranks the presence status when it is more specific.
+    expect(line).toContain('검수 대기');
+  });
+
+  it('cuts a long title on a word and keeps the card id', () => {
+    const line = taskBubble(working({
+      taskTitle: '말풍선에 카드 제목과 진행률을 표시하는 아주 긴 제목입니다',
+      taskState: 'in_progress', taskProgress: 50,
+    }), 'working', now);
+    const head = line.split('\n')[0]!;
+    expect(head.startsWith('T-16 · ')).toBe(true);
+    expect(head.endsWith('…')).toBe(true);
+    expect(head.length).toBeLessThanOrEqual('T-16 · '.length + BUBBLE_TITLE_MAX + 1);
+  });
+
+  it('warns when the lease is about to run out, in the same two lines', () => {
+    const soon = working({ taskState: 'in_progress', taskProgress: 50, leaseEndsAt: now + 120_000 });
+    const line = taskBubble(soon, 'working', now);
+    // The warning replaces the percentage on the second line rather than adding
+    // a third: the gauge under the bubble carries the share.
+    expect(line.split('\n')).toHaveLength(2);
+    expect(line).toContain('곧 만료 2분');
+    expect(line).toContain('진행 중');
+    expect(taskBubbleTone(soon, 'working', now)).toBe('warn');
+    // A lease with hours left is not the boss's problem yet.
+    const later = working({ taskState: 'in_progress', taskProgress: 50, leaseEndsAt: now + 3_600_000 });
+    expect(taskBubble(later, 'working', now)).not.toContain('곧 만료');
+    expect(taskBubbleTone(later, 'working', now)).toBe('info');
+  });
+
+  it('says nothing about a lease when there is no clock to measure it against', () => {
+    const lease = working({ taskState: 'in_progress', taskProgress: 50, leaseEndsAt: now + 60_000 });
+    expect(taskBubble(lease, 'working', 0)).not.toContain('곧 만료');
+  });
+
+  it('falls back to the plain line when the server sent no card title', () => {
+    // Older servers only send the id; the bubble must not show "undefined".
+    expect(taskBubble(working({ taskProgress: 50 }), 'working', now)).toContain('T-16');
+    expect(taskBubble({ taskId: undefined, taskProgress: undefined }, 'working', now)).toBe('작업 중…');
+  });
+});
+
+describe('what each agent is doing with a card', () => {
+  it('draws the task bubble over a working agent and carries its progress', () => {
+    const agents = [agent('ag_1', 'Codex', 'working', {
+      presence: {
+        status: 'working', label: 'Working', taskId: 'T-16',
+        taskTitle: '응답 캐시', taskState: 'in_progress', taskProgress: 50,
+      },
+    })];
+    const [scene] = planScenes(agents, office(agents), { now });
+    expect(scene?.bubble).toBe('T-16 · 응답 캐시\n진행 중 · 50%');
+    expect(scene?.progress).toBe(50);
+    expect(scene?.bubbleTone).toBe('info');
+  });
+
+  it('keeps idle chatter free of task details and gauges', () => {
+    const agents = [agent('ag_1', 'GPT', 'idle')];
+    const scenes = planScenes(agents, office(agents), { now });
+    expect(scenes[0]?.progress).toBeUndefined();
+  });
+
+  it('sends an owner whose card is blocked to the CEO office', () => {
+    const agents = [agent('ag_1', 'Codex', 'working', { presence: { status: 'working', label: 'Working', taskId: 'T-18' } })];
+    const payload = office(agents, { openTasks: [task('T-18', 'blocked', { owner: 'codex' })] });
+    const [scene] = planScenes(agents, payload, { now });
+    expect(scene?.zone).toBe('ceo');
+    expect(scene?.needsBoss).toBe(true);
   });
 });
 

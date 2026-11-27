@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   OFFICE_DEFAULT_SETTINGS,
   OFFICE_HEARTBEAT_STALE_MS,
+  TASK_LEASE_SOON_MS,
+  TASK_STATE_PROGRESS,
   agentPresence,
   archiveMatches,
   archiveSnippet,
@@ -17,6 +19,7 @@ import {
   officeBaseName,
   officeNamesMatch,
   planTemplateRun,
+  taskProgressPercent,
   usageLevel,
 } from './office.js';
 import type { OfficeAgent, OfficeArchive, OfficeAuditEntry, OfficeTemplate } from './office.js';
@@ -48,6 +51,37 @@ describe('agent presence', () => {
     expect(presence.status).toBe('offline');
   });
 
+  it('carries the card it is holding: what it is called, where it stands, how far', () => {
+    const presence = agentPresence(agent(), {
+      heartbeatAt: now - 1000,
+      active: [{
+        code: 'AAA-111-222', id: 'T-16', title: 'Response cache', state: 'in_progress',
+        leaseEndsAt: now + 120_000,
+        subtasks: { done: 3, total: 4 },
+      }],
+    }, now);
+    expect(presence).toMatchObject({
+      status: 'working', taskId: 'T-16', taskTitle: 'Response cache', taskState: 'in_progress',
+      taskProgress: 75, taskSubtasks: { done: 3, total: 4 },
+    });
+    // Only a live lease is worth showing; an expired one is history.
+    expect(presence.leaseEndsAt).toBe(now + 120_000);
+    const expired = agentPresence(agent(), {
+      heartbeatAt: now - 1000,
+      active: [{ code: 'AAA-111-222', id: 'T-16', state: 'in_progress', leaseEndsAt: now - 1 }],
+    }, now);
+    expect(expired.leaseEndsAt).toBeUndefined();
+  });
+
+  it('falls back to the card state for progress when it has no subtasks', () => {
+    const reviewing = agentPresence(agent(), {
+      heartbeatAt: now - 1000,
+      reviews: [{ code: 'BBB-111-222', id: 'T-17', title: 'Bubble UI', state: 'awaiting_review' }],
+    }, now);
+    expect(reviewing).toMatchObject({ status: 'reviewing', taskProgress: 80 });
+    expect(reviewing.taskSubtasks).toBeUndefined();
+  });
+
   it('reports reviewing before working, and available when the desk is empty', () => {
     const reviewing = agentPresence(agent(), {
       heartbeatAt: now - 1000,
@@ -56,6 +90,35 @@ describe('agent presence', () => {
     }, now);
     expect(reviewing).toMatchObject({ status: 'reviewing', taskId: 'T-02', roomCode: 'BBB-111-222' });
     expect(agentPresence(agent(), { heartbeatAt: now }, now).status).toBe('idle');
+  });
+});
+
+describe('task progress', () => {
+  it('uses the subtask tally when there is one, and the state otherwise', () => {
+    expect(taskProgressPercent({ subtasks: { done: 1, total: 3 } })).toBe(33);
+    expect(taskProgressPercent({ subtasks: { done: 3, total: 3 } })).toBe(100);
+    // A ticked-off breakdown that predates the rest of the card still cannot lie
+    // about being finished: the percentage is the subtasks' own share, clamped.
+    expect(taskProgressPercent({ subtasks: { done: 5, total: 4 } })).toBe(100);
+    expect(taskProgressPercent({ state: 'todo' })).toBe(0);
+    expect(taskProgressPercent({ state: 'in_progress' })).toBe(50);
+    expect(taskProgressPercent({ state: 'awaiting_review' })).toBe(80);
+    expect(taskProgressPercent({ state: 'done' })).toBe(100);
+  });
+
+  it('treats a claimed card and a working one as the same stage', () => {
+    // Claiming moves a card straight to in_progress on this board, so the two
+    // cannot show different progress without inventing a step.
+    expect(TASK_STATE_PROGRESS.in_progress).toBe(TASK_STATE_PROGRESS.in_progress);
+    expect(TASK_STATE_PROGRESS.paused).toBe(TASK_STATE_PROGRESS.in_progress);
+    // A rejected card keeps its work but has to come back: ahead of a fresh
+    // start, behind the review it already reached.
+    expect(TASK_STATE_PROGRESS.rejected).toBeGreaterThan(TASK_STATE_PROGRESS.in_progress);
+    expect(TASK_STATE_PROGRESS.rejected).toBeLessThan(TASK_STATE_PROGRESS.awaiting_review);
+  });
+
+  it('counts a lease as soon only inside its last three minutes', () => {
+    expect(TASK_LEASE_SOON_MS).toBe(180_000);
   });
 });
 

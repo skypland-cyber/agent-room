@@ -323,7 +323,10 @@ export function PixelOffice({ overview, selectedId, onSelect, onAddStaff, onChan
           });
           if (scene.needsBoss) drawNeedsBoss(ctx, runner.x + 19, row.feetY - 30 - row.lift, tick);
           const bubble = bubbles.get(agent.id);
-          if (bubble && scene.bubble) drawBubbleAt(ctx, bubble, scene.bubble, scene.bubbleTone);
+          if (bubble && scene.bubble) {
+            // Only a task bubble has a share to show; idle chatter is just words.
+            drawBubbleAt(ctx, bubble, scene.bubble, scene.bubbleTone, scene.progress);
+          }
           drawNameTag(ctx, runner.x, row.feetY - 25 - row.lift, agent.name);
           if (selectedId === agent.id) {
             ctx.save();
