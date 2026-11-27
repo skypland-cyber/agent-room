@@ -125,6 +125,14 @@ export const ko = {
   'presence.offline': '오프라인',
   'presence.disabled': '사용 중지',
 
+  // 좌석이 어떻게 움직이고 있는가 — 이름표의 짧은 칩과 카드의 온전한 배지.
+  'conn.external': '외부',
+  'conn.delegated': '대행',
+  'conn.external.full': '외부 접속',
+  'conn.delegated.full': '망고 대행',
+  'conn.external.hint': '사용자가 직접 켠 AI 클라이언트가 이 좌석에 접속해 있습니다.',
+  'conn.delegated.hint': '클라이언트 창 없이 망고가 이 직원 자리를 지키며 일을 대신하고 있습니다.',
+
   'qa.pending': '검수 대기',
   'qa.passed': '통과',
   'qa.failed': '실패',
@@ -198,6 +206,8 @@ export const ko = {
   'staff.empty': '아직 AI 직원이 없습니다. 오른쪽에서 한 명 추가한 뒤 회의실을 열어 참여시키세요.',
   'staff.badge.approval': '승인 필요',
   'staff.badge.disabled': '사용 중지',
+  'staff.badge.external': '외부 접속',
+  'staff.badge.delegated': '망고 대행',
   'staff.meta.tags': '태그: {tags} · ',
   'staff.meta.today': '오늘 {used}/{limit} · ',
   'staff.meta.heartbeat': '하트비트 {time}',
@@ -787,6 +797,8 @@ export const ko = {
   'iso.legend.anim': '연출 — 대기 중인 직원이 걷고, 커피를 마시고, 소파에 앉는 움직임',
   'iso.legend.liveCount': '실제 {count}명',
   'iso.legend.animCount': '연출 {count}명',
+  'iso.legend.conn.external': '외부 접속 — 직접 켠 AI 클라이언트',
+  'iso.legend.conn.delegated': '망고 대행 — 망고가 대신 움직이는 좌석',
 
   // ── 관찰 모드 ──────────────────────────────────────────────────────────
   'iso.observe.enter': '관찰 모드',

@@ -20,6 +20,7 @@ import {
 import { paletteFor } from './palette.js';
 import { openTasksFor } from './scene.js';
 import { Badge, Button, ErrorNote, Field, Input, TextArea, timeAgo, useOfficeAction } from '../ui.js';
+import { ConnectionBadge } from '../ConnectionBadge.js';
 import { useI18n } from '../../../i18n/index.js';
 import { message } from '../../../i18n/errors.js';
 import { presenceLabel, taskStateLabel } from '../../../i18n/labels.js';
@@ -113,6 +114,7 @@ export function OfficeAgentPanel({ agent, overview, onClose, onChanged, onNotify
             <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: paletteFor(agent.name).shirt }} />
             <p className="truncate text-sm font-semibold text-ink">{agent.name}</p>
             <Badge tone={STATUS_TONE[agent.presence.status] ?? 'neutral'}>{presenceLabel(agent.presence, agent.enabled)}</Badge>
+            <ConnectionBadge mode={agent.presence.connectionMode} />
           </div>
           <p className="mt-0.5 truncate text-[11px] text-ink-soft">{agent.role}</p>
         </div>

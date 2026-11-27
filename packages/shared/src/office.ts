@@ -115,6 +115,28 @@ export function officeNamesMatch(a: string | undefined, b: string | undefined): 
 
 export type OfficeAgentStatus = 'working' | 'reviewing' | 'idle' | 'paused' | 'offline';
 
+/**
+ * Who is actually driving a seat.
+ *
+ * The same staff member can be at its desk in two very different ways, and from
+ * the floor they used to look identical:
+ *
+ *   - `external` — a client the person opened themselves (Codex, ChatGPT, an
+ *     Antigravity CLI window) joined the room and is polling under its own name.
+ *   - `delegated` — the person's own assistant is keeping the seat warm and
+ *     doing the work on that staff member's behalf, with no client window open.
+ *
+ * A seat that says nothing is read as `external`: an MCP client has to know
+ * about this field at all to send it, so silence means an ordinary outside
+ * client rather than a delegated runner.
+ */
+export type OfficeConnectionMode = 'external' | 'delegated';
+
+/** Read a stored or submitted value as a connection mode. Anything else is "not given". */
+export function parseOfficeConnectionMode(value: unknown): OfficeConnectionMode | undefined {
+  return value === 'external' || value === 'delegated' ? value : undefined;
+}
+
 export interface OfficeAgentPresence {
   status: OfficeAgentStatus;
   label: string;
@@ -140,6 +162,15 @@ export interface OfficeAgentPresence {
   taskProgress?: number;
   /** The subtask tally `taskProgress` was read from, when the card has subtasks. */
   taskSubtasks?: { done: number; total: number };
+  /**
+   * How this seat is being driven, from its latest heartbeat.
+   *
+   * Sent only while the seat is online: an offline desk is offline whichever
+   * way it was driven, and the last mode it used would be a claim about right
+   * now that nobody can back. An older heartbeat that never carried the field
+   * leaves it out too, so the floor can say "unknown" rather than guess.
+   */
+  connectionMode?: OfficeConnectionMode;
   /**
    * How the link is behaving, next to the coarser `status` above.
    *
@@ -205,6 +236,8 @@ export interface AgentTaskActivity {
 
 export interface AgentActivity {
   heartbeatAt?: number;
+  /** How the seat is being driven, carried by the heartbeat that keeps it alive. */
+  connectionMode?: OfficeConnectionMode;
   /** Tasks this agent owns and is executing (in_progress / rejected). */
   active?: AgentTaskActivity[];
   /** Reviews waiting on this agent. */
@@ -246,6 +279,9 @@ export function agentPresence(agent: OfficeAgent, activity: AgentActivity, now: 
     ...(activity.reconnects !== undefined ? { reconnects: activity.reconnects } : {}),
     ...(activity.lastResumeAt !== undefined ? { lastResumeAt: activity.lastResumeAt } : {}),
   });
+  // Presence only names the connection mode of a seat that is actually here: an
+  // offline desk keeps the offline look, and a paused one is paused, not driven.
+  const driven = activity.connectionMode ? { connectionMode: activity.connectionMode } : {};
   if (!agent.enabled) {
     return { status: 'offline', label: 'Disabled', ...(heartbeatAgeMs !== undefined ? { heartbeatAgeMs } : {}), link };
   }
@@ -259,18 +295,18 @@ export function agentPresence(agent: OfficeAgent, activity: AgentActivity, now: 
   const review = activity.reviews?.[0];
   if (review) {
     return {
-      status: 'reviewing', label: 'Reviewing', heartbeatAgeMs, link,
+      status: 'reviewing', label: 'Reviewing', heartbeatAgeMs, link, ...driven,
       taskId: review.id, roomCode: review.code, ...taskPresence(review, now),
     };
   }
   const active = activity.active?.[0];
   if (active) {
     return {
-      status: 'working', label: 'Working', heartbeatAgeMs, link,
+      status: 'working', label: 'Working', heartbeatAgeMs, link, ...driven,
       taskId: active.id, roomCode: active.code, ...taskPresence(active, now),
     };
   }
-  return { status: 'idle', label: 'Available', heartbeatAgeMs, link };
+  return { status: 'idle', label: 'Available', heartbeatAgeMs, link, ...driven };
 }
 
 export interface OfficeAgentView extends OfficeAgent {
