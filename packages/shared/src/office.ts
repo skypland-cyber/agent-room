@@ -683,6 +683,10 @@ export interface OfficeRoomSummary {
   topic: string;
   status: string;
   createdAt: number;
+  /** createdAt + the 30-day room lifetime. Rooms really do disappear. */
+  expiresAt: number;
+  /** Whole days left before the room expires; 0 means the last day. */
+  daysLeft: number;
   participants: number;
   agents: number;
   openTasks: number;
@@ -695,6 +699,25 @@ export interface OfficeIntegrations {
   storage: boolean;
   mcpGrants: number;
   adminConfigured: boolean;
+}
+
+/**
+ * What happened in the office today, counted from the boards the overview already
+ * walks. It exists so the dashboard opens with an answer ("three things finished
+ * today") instead of only a state, and it costs no extra read.
+ */
+export interface OfficeTodaySummary {
+  /** KST day the counts belong to, `YYYY-MM-DD`. */
+  day: string;
+  /** Tasks whose verifier ruled `done` today. Legacy cards without a verdict time are not counted. */
+  doneToday: number;
+  inProgress: number;
+  /** blocked + rejected + pending_approval: anything waiting on a person. */
+  needsAttention: number;
+  /** Live rooms with three days or less left. */
+  expiringRooms: number;
+  /** How many rooms this number was read from (the overview's own cap). */
+  roomsScanned: number;
 }
 
 export interface OfficeOverview {
@@ -723,4 +746,9 @@ export interface OfficeOverview {
   archives: Array<Pick<OfficeArchive, 'id' | 'roomCode' | 'topic' | 'archivedAt' | 'summary'>>;
   recentAudit: OfficeAuditEntry[];
   warnings: string[];
+  /**
+   * Omitted on a `withoutRooms` response: with no board walk there is nothing to
+   * count. Optional also so a newer client can read an older server's payload.
+   */
+  todaySummary?: OfficeTodaySummary;
 }

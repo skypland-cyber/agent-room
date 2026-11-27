@@ -15,7 +15,7 @@ import {
   meetingSeats,
   spotFor,
 } from './officeMap.js';
-import { PAIR_LINES, SOLO_LINES, chatTurn, restSeed, restStayFor, restTogether } from './idleChat.js';
+import { PAIR_LINES, chatTurn, lineIndex, restSeed, restStayFor, restTogether, soloPoolFor, type RestArea } from './idleChat.js';
 import { t } from '../../../i18n/index.js';
 
 export type SceneZone = 'desk' | 'meeting' | 'ceo' | 'lounge' | 'pantry' | 'overflow';
@@ -257,10 +257,11 @@ export function attachIdleChat(scenes: AgentScene[], nowMs: number): AgentScene[
     // depend on which of them happened to be planned first.
     const first = restSeed(scene.agentId) <= restSeed(partner.agentId) ? scene : partner;
     const second = first === scene ? partner : scene;
-    const turn = chatTurn(restSeed([first.agentId, second.agentId].sort().join('|')), nowMs);
+    const pairSeed = restSeed([first.agentId, second.agentId].sort().join('|'));
+    const turn = chatTurn(pairSeed, nowMs);
     if (!turn.speaking) continue;
     const speaker = turn.cycle % 2 === 0 ? first : second;
-    const line = PAIR_LINES[Math.floor(turn.cycle / 2) % PAIR_LINES.length]!;
+    const line = PAIR_LINES[lineIndex(pairSeed, Math.floor(turn.cycle / 2), PAIR_LINES.length)]!;
     speaker.bubble = turn.cycle % 2 === 0 ? t(line.ask) : t(line.answer);
     speaker.bubbleTone = turn.cycle % 2 === 0 ? 'info' : 'good';
   }
@@ -270,7 +271,10 @@ export function attachIdleChat(scenes: AgentScene[], nowMs: number): AgentScene[
     const seed = restSeed(scene.agentId);
     const turn = chatTurn(seed, nowMs);
     if (!turn.speaking) continue;
-    scene.bubble = t(SOLO_LINES[(turn.cycle + seed) % SOLO_LINES.length]!);
+    // The pantry counter and the lobby sofa have their own things to talk about.
+    const area: RestArea = scene.zone === 'pantry' ? 'pantry' : 'lounge';
+    const pool = soloPoolFor(area);
+    scene.bubble = t(pool[lineIndex(seed, turn.cycle, pool.length)]!);
     scene.bubbleTone = 'good';
   }
 

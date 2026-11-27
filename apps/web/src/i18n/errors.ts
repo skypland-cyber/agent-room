@@ -74,8 +74,8 @@ export function errorText(cause: unknown): string | null {
 
 /**
  * The floor's warning strip. The server writes these as English sentences for
- * any client, so the three shapes it can produce are recognised and rewritten;
- * a fourth shape passes through as it arrived.
+ * any client, so the shapes it can produce are recognised and rewritten; a shape
+ * this client does not know passes through as it arrived.
  */
 export function warningText(warning: string): string {
   const usage = warning.match(/Office API usage today is at (\d+)% of the ([\d,]+) request budget\./);
@@ -83,6 +83,14 @@ export function warningText(warning: string): string {
   if (/Some AI staff are disabled/.test(warning)) return t('warning.disabledStaff');
   const approvals = warning.match(/(\d+) tasks? waiting for approval\./);
   if (approvals) return t('warning.approvals', { count: approvals[1] ?? '0' });
+  // A room is about to vanish: the one warning that asks for an action today.
+  const expiring = warning.match(/Room ([A-Z0-9-]+) expires in (\d+) days?\./);
+  if (expiring) {
+    const count = expiring[2] ?? '0';
+    return t(count === '1' ? 'warning.roomExpiringOne' : 'warning.roomExpiring', { code: expiring[1] ?? '', count });
+  }
+  const expired = warning.match(/Room ([A-Z0-9-]+) has expired\./);
+  if (expired) return t('warning.roomExpired', { code: expired[1] ?? '' });
   return warning;
 }
 

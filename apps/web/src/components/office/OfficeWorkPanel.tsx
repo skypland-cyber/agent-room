@@ -4,7 +4,7 @@
 // is one nobody can audit later.
 import { useState } from 'react';
 import type { OfficeOverview, OfficeTaskRef } from '@agent-room/shared';
-import { abortTask, approveTask, archiveRoomNow, pauseTask, rejectTask, requestApproval, resumeTask, retryTask } from '../../lib/officeApi.js';
+import { abortTask, approveTask, archiveRoomNow, deleteRoom, endRoom, pauseTask, rejectTask, requestApproval, resumeTask, retryTask } from '../../lib/officeApi.js';
 import { Badge, Button, Card, Empty, ErrorNote, Input, SectionTitle, formatDate, useOfficeAction } from './ui.js';
 import { useI18n } from '../../i18n/index.js';
 import { qaStatusLabel, roomStatusLabel, taskStateLabel } from '../../i18n/labels.js';
@@ -164,29 +164,63 @@ export function OfficeWorkPanel({ overview, onChanged }: Props) {
             <SectionTitle title={t('work.rooms.title', { count: overview.rooms.length })} hint={t('work.rooms.hint')} />
             {overview.rooms.length === 0 ? <Empty>{t('work.rooms.empty')}</Empty> : (
               <ul className="grid gap-2">
-                {overview.rooms.map(room => (
+                {overview.rooms.map(room => {
+                  const live = room.status === 'active';
+                  // A room lives 30 days and then its data is gone: the badge is
+                  // the only place that says so before it happens.
+                  const expiryTone = !live ? 'neutral' : room.daysLeft <= 1 ? 'bad' : room.daysLeft <= 3 ? 'warn' : 'neutral';
+                  return (
                   <li key={room.code} className="rounded-xl border border-border-faint bg-white px-3 py-2">
-                    <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <a href={`/r/${room.code}`} className="min-w-0">
                         <span className="block truncate text-xs font-semibold text-ink">{room.topic}</span>
                         <span className="font-mono text-[10px] text-ink-faint">
                           {room.code} · {t('work.room.seated', { count: room.participants })} · {t('work.room.agents', { count: room.agents })}
                         </span>
                       </a>
-                      <div className="flex shrink-0 items-center gap-1">
-                        <Badge tone={room.status === 'active' ? 'good' : 'neutral'}>{roomStatusLabel(room.status)}</Badge>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge tone={live ? 'good' : 'neutral'}>{roomStatusLabel(room.status)}</Badge>
+                        <Badge tone={expiryTone}>
+                          {room.daysLeft > 0
+                            ? t('work.room.dday', { days: room.daysLeft })
+                            : t('work.room.expired')}
+                        </Badge>
                         <Button variant="quiet" title={t('work.room.archiveTitle')}
                           disabled={busy !== null}
                           onClick={() => void run(`archive-${room.code}`, () => archiveRoomNow(room.code))}>
                           {t('work.room.archive')}
                         </Button>
+                        <a href="/new" title={t('work.room.newTitle')}
+                          className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-transparent bg-surface-sunken px-3 py-2 text-xs font-semibold text-ink-muted transition hover:text-ink">
+                          {t('work.room.new')}
+                        </a>
+                        {live ? (
+                          <Button variant="quiet" title={t('work.room.endTitle')}
+                            disabled={busy !== null}
+                            onClick={() => void run(`end-${room.code}`, () => endRoom(room.code))}>
+                            {t('work.room.end')}
+                          </Button>
+                        ) : null}
+                        <Button variant="danger" title={t('work.room.deleteTitle')}
+                          disabled={busy !== null}
+                          onClick={() => {
+                            if (!window.confirm(t('work.room.deleteConfirm', { code: room.code }))) return;
+                            void run(`delete-${room.code}`, () => deleteRoom(room.code));
+                          }}>
+                          {t('work.room.delete')}
+                        </Button>
                       </div>
                     </div>
                     <p className="mt-1 text-[10px] text-ink-faint">
                       {t('work.room.line', { open: room.openTasks, done: room.doneTasks, pending: room.pendingApproval })}
+                      {' · '}
+                      {room.daysLeft > 0
+                        ? t('work.room.expiryTitle', { days: room.daysLeft })
+                        : t('work.room.expired')}
                     </p>
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             )}
           </Card>

@@ -39,6 +39,7 @@ import { createBlobStore } from './_blobStore.js';
 import {
   AVATAR_PALETTE,
   OFFICE_DEFAULT_SETTINGS,
+  ROOM_TTL_SECONDS,
   agentPresence,
   filterAudit,
   kstDay,
@@ -56,6 +57,17 @@ import type {
 
 /** How many rooms one dashboard request will walk. Bounded for cost, not vanity. */
 export const OFFICE_OVERVIEW_ROOM_LIMIT = 24;
+
+/** A room is "expiring" at this many days or fewer left. */
+export const ROOM_EXPIRING_DAYS = 3;
+
+const DAY_MS = 86_400_000;
+
+/** When a room disappears, and how many whole days are left (0 = last day). */
+export function roomExpiry(createdAt: number, now: number): { expiresAt: number; daysLeft: number } {
+  const expiresAt = createdAt + ROOM_TTL_SECONDS * 1000;
+  return { expiresAt, daysLeft: Math.max(0, Math.ceil((expiresAt - now) / DAY_MS)) };
+}
 
 export class OfficeApiError extends Error {
   constructor(message: string, readonly status: number, readonly code: string) {
@@ -203,18 +215,33 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
   };
   let openTasks = 0;
   let doneTasks = 0;
+  let doneToday = 0;
+  let inProgress = 0;
+  let needsAttention = 0;
+  let expiringRooms = 0;
 
   for (const { code, room, board } of loaded) {
     if (!room) continue;
     if (room.status === 'ended' && !board) continue;
     const topic = room.topic || code;
+    // The room's own lifetime, read from the record we already have.
+    const { expiresAt, daysLeft } = roomExpiry(room.createdAt, now);
+    if (room.status === 'active' && daysLeft <= ROOM_EXPIRING_DAYS) expiringRooms += 1;
     let roomOpen = 0;
     let roomDone = 0;
     let roomApprovals = 0;
     for (const task of board?.tasks ?? []) {
       const ref = taskRef(code, topic, task);
-      if (task.state === 'pending_approval') { approvals.push(ref); roomApprovals += 1; openTasks += 1; continue; }
-      if (task.state === 'done') { roomDone += 1; doneTasks += 1; continue; }
+      if (task.state === 'pending_approval') { approvals.push(ref); roomApprovals += 1; openTasks += 1; needsAttention += 1; continue; }
+      if (task.state === 'done') {
+        roomDone += 1; doneTasks += 1;
+        // Only a ruling made today counts; a legacy card with no verdict time
+        // must not inflate "today" with work finished weeks ago.
+        if (task.verdict?.verdict === 'done' && kstDay(task.verdict.at) === day) doneToday += 1;
+        continue;
+      }
+      if (task.state === 'in_progress') inProgress += 1;
+      if (task.state === 'blocked' || task.state === 'rejected') needsAttention += 1;
       if (isOpenTask(task)) {
         roomOpen += 1;
         openTasks += 1;
@@ -240,6 +267,8 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
       topic,
       status: room.status,
       createdAt: room.createdAt,
+      expiresAt,
+      daysLeft,
       participants: room.participants.length,
       agents: room.participants.filter(p => p.client === 'cc').length,
       openTasks: roomOpen,
@@ -273,6 +302,12 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
   }
   if (agentViews.some(agent => !agent.enabled)) warnings.push('Some AI staff are disabled and will not receive work.');
   if (approvals.length) warnings.push(`${approvals.length} task${approvals.length === 1 ? '' : 's'} waiting for approval.`);
+  for (const room of rooms) {
+    if (room.status !== 'active' || room.daysLeft > ROOM_EXPIRING_DAYS) continue;
+    warnings.push(room.daysLeft > 0
+      ? `Room ${room.code} expires in ${room.daysLeft} day${room.daysLeft === 1 ? '' : 's'}.`
+      : `Room ${room.code} has expired.`);
+  }
 
   return {
     generatedAt: now,
@@ -327,6 +362,17 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
     })),
     recentAudit: filterAudit(auditRows, { limit: 12 }),
     warnings,
+    // A `withoutRooms` payload never walked a board, so it has nothing to summarise.
+    ...(options.withoutRooms ? {} : {
+      todaySummary: {
+        day,
+        doneToday,
+        inProgress,
+        needsAttention,
+        expiringRooms,
+        roomsScanned: rooms.length,
+      },
+    }),
   };
 }
 
@@ -431,17 +477,20 @@ export async function seatAgents(
 }
 
 /** Room list for the office, without walking every board. */
-export async function roomSummaries(store: UpstashClient): Promise<OfficeRoomSummary[]> {
+export async function roomSummaries(store: UpstashClient, now: number = Date.now()): Promise<OfficeRoomSummary[]> {
   const codes = await knownRoomCodes(store);
   const loaded = await loadRooms(store, codes);
   const out: OfficeRoomSummary[] = [];
   for (const { code, room, board } of loaded) {
     if (!room) continue;
+    const { expiresAt, daysLeft } = roomExpiry(room.createdAt, now);
     out.push({
       code,
       topic: room.topic,
       status: room.status,
       createdAt: room.createdAt,
+      expiresAt,
+      daysLeft,
       participants: room.participants.length,
       agents: room.participants.filter(p => p.client === 'cc').length,
       openTasks: (board?.tasks ?? []).filter(isOpenTask).length,
