@@ -236,6 +236,22 @@ describe('deliverables that outlive their room', () => {
     expect(detail.jsonBody.archive.deliverables[0]).toMatchObject({ name: '상패 시안.png', version: 1 });
   });
 
+  it('keeps the deliverables when the room itself is deleted', async () => {
+    const cookie = await signIn();
+    const now = Date.now();
+    await seedRoom(now);
+    await seedDeliverable(now);
+    const removed = await call('rooms.delete', { code: CODE }, cookie);
+    expect(removed.statusCode).toBe(200);
+    expect(removed.jsonBody.deleted).toBe(true);
+    // Deleting a room is not asking to delete the work it produced.
+    expect(removed.jsonBody).toMatchObject({ keptDeliverables: 1 });
+    expect(removed.jsonBody.archiveId).toMatch(/^arc_/);
+    const listed = await call('deliverables.list', { code: CODE }, cookie);
+    expect(listed.jsonBody.total).toBe(1);
+    expect(listed.jsonBody.files[0].downloadUrl).toContain('/api/files?token=');
+  });
+
   it('still finds the file when the room itself is gone', async () => {
     const cookie = await signIn();
     const now = Date.now();

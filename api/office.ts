@@ -529,14 +529,23 @@ async function handleRooms(store: ReturnType<typeof officeStore>, action: string
     send(res, 200, { room: { ...summary, status: ended.status, endedAt: ended.endedAt } });
     return;
   }
+  // Deliverables are meant to outlive their room, so deleting a room that
+  // produced any archives them first: the room and then the transcript go, the
+  // files and their index stay. Deleting the minutes of a room that produced
+  // work is not something "delete the room" was ever asking for.
+  const deliverables = await office.listVaultFiles(store, 'deliverable', code).catch(() => []);
+  const archived = deliverables.length > 0
+    ? await captureRoomArchive(store, code, OWNER).catch(() => null)
+    : null;
   await office.unregisterBoardRoom(store, code);
   await office.unregisterOfficeRoom(store, code);
   await office.deleteRoomData(store, code);
   await audit(store, OWNER, 'room.delete', {
     roomCode: code,
-    detail: `${room.topic.slice(0, 100)} · ${messages.length} messages discarded`,
+    detail: `${room.topic.slice(0, 100)} · ${messages.length} messages discarded`
+      + (archived ? ` · ${deliverables.length} deliverables kept in archive ${archived.id}` : ''),
   });
-  send(res, 200, { deleted: true, ...summary });
+  send(res, 200, { deleted: true, ...summary, ...(archived ? { archiveId: archived.id, keptDeliverables: deliverables.length } : {}) });
 }
 
 async function handleArchives(store: ReturnType<typeof officeStore>, action: string, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
