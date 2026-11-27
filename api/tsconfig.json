@@ -8,6 +8,6 @@
     "allowJs": false,
     "types": ["node"]
   },
-  "include": ["*.ts"],
-  "exclude": ["*.test.ts"]
+  "include": ["*.ts", "_notion/*.ts"],
+  "exclude": ["*.test.ts", "_notion/*.test.ts"]
 }
