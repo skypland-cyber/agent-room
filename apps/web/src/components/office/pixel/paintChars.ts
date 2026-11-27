@@ -7,7 +7,7 @@
 // be derived from its name instead of shipped as an asset.
 import type { DeskSlot } from './officeMap.js';
 import { DESK_H, DESK_W, TILE } from './officeMap.js';
-import type { BubblePlacement } from './bubbleLayout.js';
+import { BUBBLE_GAUGE_HEIGHT, BUBBLE_LINE_STEP, type BubblePlacement } from './bubbleLayout.js';
 import type { Palette } from './palette.js';
 import type { BubbleTone, ScenePose } from './scene.js';
 
@@ -222,8 +222,18 @@ export const BUBBLE_FONT = 'bold 8px ui-monospace, SFMono-Regular, monospace';
  * Paint a bubble where `layoutBubbles` decided it goes. `layout` is what kept it off
  * its neighbours and inside the map; this only fills in the box. A bubble pushed up
  * to make room hangs a 1 px stem back down to the speaker so it still reads as his.
+ *
+ * A task bubble carries a second line (the state and how far along) and a thin
+ * gauge along its bottom edge, so one glance says which card, what state, how much
+ * left — without the boss having to walk up and open the panel.
  */
-export function drawBubbleAt(ctx: CanvasRenderingContext2D, layout: BubblePlacement, text: string, tone: BubbleTone): void {
+export function drawBubbleAt(
+  ctx: CanvasRenderingContext2D,
+  layout: BubblePlacement,
+  text: string,
+  tone: BubbleTone,
+  progress?: number,
+): void {
   const palette = BUBBLE_TONE[tone];
   const { left, top, width, height, tailX, anchorY } = layout;
   const bottom = top + height;
@@ -233,13 +243,32 @@ export function drawBubbleAt(ctx: CanvasRenderingContext2D, layout: BubblePlacem
   box(ctx, left + 1, top + 1, width - 2, height - 2, palette.fill);
   box(ctx, tailX - 2, bottom, 4, 2, palette.border);
   box(ctx, tailX - 1, bottom, 2, 1, palette.fill);
+
+  const gauge = progress === undefined ? 0 : BUBBLE_GAUGE_HEIGHT;
+  const lines = text.split('\n').filter(line => line.trim().length > 0);
+  // The text sits in the box minus the gauge, and the block of lines is centred
+  // in what is left, so a one-line bubble and a two-line bubble both look square.
+  const textTop = top + 1;
+  const textBottom = bottom - 1 - gauge;
+  const centre = (textTop + textBottom) / 2;
   ctx.save();
   ctx.font = BUBBLE_FONT;
   ctx.fillStyle = palette.text;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(text, Math.round(left + width / 2), Math.round(bottom - height / 2) + 0.5, width - 6);
+  lines.forEach((line, index) => {
+    const y = centre + (index - (lines.length - 1) / 2) * BUBBLE_LINE_STEP;
+    ctx.fillText(line, Math.round(left + width / 2), Math.round(y) + 0.5, width - 6);
+  });
   ctx.restore();
+
+  if (progress !== undefined) {
+    const filled = Math.max(0, Math.min(100, Math.round(progress)));
+    const trackLeft = left + 3;
+    const trackWidth = Math.max(1, width - 6);
+    box(ctx, trackLeft, bottom - gauge - 1, trackWidth, 2, 'rgba(17,19,24,0.18)');
+    box(ctx, trackLeft, bottom - gauge - 1, Math.round((trackWidth * filled) / 100), 2, palette.border);
+  }
 }
 
 /** The name chip just above a head: the bubble sits above this, not on it. */

@@ -47,6 +47,7 @@ import {
   usageLevel,
 } from '@agent-room/shared';
 import type {
+  AgentTaskActivity,
   OfficeAgent,
   OfficeAgentView,
   OfficeAuditEntry,
@@ -62,11 +63,116 @@ export const OFFICE_OVERVIEW_ROOM_LIMIT = 24;
 export const ROOM_EXPIRING_DAYS = 3;
 
 const DAY_MS = 86_400_000;
+const KST_OFFSET_MS = 9 * 3_600_000;
 
 /** When a room disappears, and how many whole days are left (0 = last day). */
 export function roomExpiry(createdAt: number, now: number): { expiresAt: number; daysLeft: number } {
   const expiresAt = createdAt + ROOM_TTL_SECONDS * 1000;
   return { expiresAt, daysLeft: Math.max(0, Math.ceil((expiresAt - now) / DAY_MS)) };
+}
+
+/**
+ * How long one dashboard payload may be reused, in seconds.
+ *
+ * The number is a staleness budget, not a performance knob: 110 seconds is
+ * shorter than the fastest tab (the work tab polls every two minutes), so no
+ * tab ever shows a payload older than the one before it, and short enough that
+ * an agent's heartbeat, a board change or a finished task shows up on the next
+ * poll or two. A write through this API drops the cache outright, so the only
+ * staleness left is work done by agents in a room.
+ */
+export const OFFICE_OVERVIEW_CACHE_TTL_SECONDS = 110;
+
+/** Seconds remaining until the next midnight in KST, never zero. */
+export function secondsToKstMidnight(now: number): number {
+  const sinceMidnight = (((now + KST_OFFSET_MS) % DAY_MS) + DAY_MS) % DAY_MS;
+  return Math.max(1, Math.ceil((DAY_MS - sinceMidnight) / 1000));
+}
+
+/** The cache TTL: 110 seconds, cut short at midnight (the key already changes then). */
+export function overviewCacheTtl(now: number): number {
+  return Math.max(1, Math.min(OFFICE_OVERVIEW_CACHE_TTL_SECONDS, secondsToKstMidnight(now)));
+}
+
+/**
+ * One key per KST day and per shape of payload. The day is in the key so the
+ * "today" numbers can never be served after the day they were counted for, and
+ * the shape is in the key because a `withoutRooms` reply legitimately has no
+ * room walk and no summary in it.
+ */
+export function overviewCacheKey(day: string, variant: 'full' | 'without-rooms'): string {
+  return `office:overview:v1:${day}:${variant}`;
+}
+
+/** Both keys a single write has to drop. Sent as one DEL: one command, not two. */
+export function overviewCacheKeys(now: number): [string, string] {
+  const day = kstDay(now);
+  return [overviewCacheKey(day, 'full'), overviewCacheKey(day, 'without-rooms')];
+}
+
+/** A cached payload that is not shaped like an overview is a miss, not a crash. */
+function parseCachedOverview(raw: unknown): OfficeOverview | null {
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as OfficeOverview | null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!Array.isArray(parsed.agents) || !Array.isArray(parsed.rooms) || !Array.isArray(parsed.openTasks)) return null;
+    if (typeof parsed.generatedAt !== 'number') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export type OverviewCacheState = 'hit' | 'miss' | 'fresh';
+
+export interface CachedOverview {
+  overview: OfficeOverview;
+  /** `hit`: served from Redis. `miss`: built and stored. `fresh`: built on request, cache ignored. */
+  cache: OverviewCacheState;
+}
+
+/**
+ * Read the dashboard through the cache.
+ *
+ * The cache exists because the dashboard's own polling is what the free tier's
+ * command budget pays for: a refresh walks every collection and up to 24 rooms,
+ * so a handful of open tabs would spend the day's 10,000 commands in hours. A
+ * hit costs one GET and answers in milliseconds.
+ *
+ * Anything that is not a clean hit falls back to `buildOverview`, so a broken
+ * value, an unreadable Redis or a deploy that changed the payload shape costs
+ * one rebuild rather than an error page. `fresh` is what the boss's own refresh
+ * button and every write use: skip the read and leave the new answer behind for
+ * the polls that follow.
+ */
+export async function getCachedOverview(
+  store: UpstashClient,
+  options: OverviewOptions & { fresh?: boolean; now?: number } = {},
+): Promise<CachedOverview> {
+  const now = options.now ?? Date.now();
+  const key = overviewCacheKey(kstDay(now), options.withoutRooms ? 'without-rooms' : 'full');
+  if (!options.fresh) {
+    const raw = await store.command<string | null>(['GET', key]).catch(() => null);
+    const cached = parseCachedOverview(raw);
+    if (cached) return { overview: cached, cache: 'hit' };
+  }
+  const overview = await buildOverview(store, options);
+  // Storing the answer is best effort: a cache that cannot be written must not
+  // stop the dashboard from opening.
+  await store.command(['SET', key, JSON.stringify(overview), 'EX', overviewCacheTtl(now)]).catch(() => null);
+  return { overview, cache: options.fresh ? 'fresh' : 'miss' };
+}
+
+/**
+ * Drop every cached overview for today. Called after a write, so the next poll —
+ * not the poll after the TTL — sees the change.
+ *
+ * Only today's keys are dropped: a key from an earlier day cannot exist, because
+ * `overviewCacheTtl` never lets one outlive its midnight.
+ */
+export async function invalidateOfficeOverview(store: UpstashClient, now: number = Date.now()): Promise<void> {
+  await store.command(['DEL', ...overviewCacheKeys(now)]).catch(() => 0);
 }
 
 export class OfficeApiError extends Error {
@@ -160,6 +266,30 @@ function taskRef(code: string, roomTopic: string, task: Task): OfficeTaskRef {
   };
 }
 
+/**
+ * The card an agent is holding, in the shape presence needs.
+ *
+ * Presence is what the pixel floor draws over a head, so it carries the card's
+ * name, its state and where its progress stands — but nothing the board does not
+ * already say. The lease is attached only while it is live: an expired lease is
+ * history, and painting "about to expire" over a lease that already ran out
+ * would send the boss looking for a problem that has already resolved itself.
+ */
+function activityRef(code: string, task: Task, now: number): AgentTaskActivity {
+  const subtasks = task.subtasks ?? [];
+  const lease = task.lease;
+  return {
+    code,
+    id: task.id,
+    title: task.title,
+    state: task.state,
+    ...(lease && lease.status === 'active' && lease.expiresAt > now ? { leaseEndsAt: lease.expiresAt } : {}),
+    ...(subtasks.length > 0
+      ? { subtasks: { done: subtasks.filter(subtask => subtask.done).length, total: subtasks.length } }
+      : {}),
+  };
+}
+
 /** True for states that still ask something of somebody. */
 export function isOpenTask(task: Pick<Task, 'state'>): boolean {
   return task.state !== 'done' && task.state !== 'rejected' && task.state !== 'cancelled' && task.state !== 'aborted';
@@ -198,8 +328,8 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
   const approvals: OfficeTaskRef[] = [];
   const qaQueue: OfficeTaskRef[] = [];
   const failed: OfficeTaskRef[] = [];
-  const ownedByAgent = new Map<string, Array<{ code: string; id: string }>>();
-  const reviewsByAgent = new Map<string, Array<{ code: string; id: string }>>();
+  const ownedByAgent = new Map<string, AgentTaskActivity[]>();
+  const reviewsByAgent = new Map<string, AgentTaskActivity[]>();
   // Board work is recorded under the room name the agent was using, and rooms
   // decorate names: a rejoin gets "Gemini (2)", an agent adds its role
   // ("망고 (총괄 매니저)"). Presence is read from the roster name, so fold a
@@ -251,14 +381,14 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
         if (task.qa && task.qa.status === 'pending') qaQueue.push(ref);
         const verifier = staffKey(task.verifier);
         const list = reviewsByAgent.get(verifier) ?? [];
-        list.push({ code, id: task.id });
+        list.push(activityRef(code, task, now));
         reviewsByAgent.set(verifier, list);
       }
       if (task.state === 'rejected') failed.push(ref);
       if (task.owner && (task.state === 'in_progress' || task.state === 'rejected')) {
         const owner = staffKey(task.owner);
         const list = ownedByAgent.get(owner) ?? [];
-        list.push({ code, id: task.id });
+        list.push(activityRef(code, task, now));
         ownedByAgent.set(owner, list);
       }
     }

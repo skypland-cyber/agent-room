@@ -365,6 +365,11 @@ export const en: Record<MessageKey, string> = {
   'pixel.bubble.free': 'free',
   'pixel.bubble.reviewing': 'reviewing',
   'pixel.bubble.reviewTask': '{id} review',
+  'pixel.bubble.taskLine': '{id} · {title}',
+  'pixel.bubble.stateWorking': 'working',
+  'pixel.bubble.stateReviewing': 'reviewing',
+  'pixel.bubble.subtasks': '{done}/{total}',
+  'pixel.bubble.leaseSoon': 'lease {minutes}m left',
   // Idle small talk: short enough for a bubble (about a dozen characters),
   // general first, then the pantry and the lounge — the way real coworkers chat.
   'pixel.chat.coffee': 'coffee break ☕',

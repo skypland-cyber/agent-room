@@ -74,9 +74,9 @@ export function Office() {
   // The poll is minutes apart now, so "updated 2 minutes ago" has to tick by itself.
   const [, setClock] = useState(0);
 
-  const loadOverview = useCallback(async () => {
+  const loadOverview = useCallback(async (freshness: 'cached' | 'fresh' = 'cached') => {
     const seq = ++requestSeq.current;
-    const next = await officeOverview();
+    const next = await officeOverview({ freshness });
     if (seq !== requestSeq.current) return next;
     setOverview(next);
     // The server's stamp, not the browser's: it says when the numbers were read.
@@ -89,7 +89,7 @@ export function Office() {
     try {
       const next = await officeStatus();
       setStatus(next);
-      if (next.authenticated) await loadOverview();
+      if (next.authenticated) await loadOverview('fresh');
       else { setOverview(null); }
       setError(null);
     } catch (cause) {
@@ -118,7 +118,7 @@ export function Office() {
     setBusy(true);
     setError(null);
     try {
-      await loadOverview();
+      await loadOverview('fresh');
     } catch (cause) {
       setError(cause);
     } finally {
@@ -149,7 +149,7 @@ export function Office() {
   const onChanged = useCallback(async () => {
     setError(null);
     try {
-      await loadOverview();
+      await loadOverview('fresh');
     } catch (cause) {
       setError(cause);
     }

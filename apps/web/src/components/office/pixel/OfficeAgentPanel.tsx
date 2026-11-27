@@ -146,6 +146,8 @@ export function OfficeAgentPanel({ agent, overview, onClose, onChanged, onNotify
               <dd className="font-semibold text-ink">
                 <a href={`/r/${agent.presence.roomCode}`} className="font-mono text-accent-deep hover:underline">{agent.presence.roomCode}</a>
                 {agent.presence.taskId ? ` · ${agent.presence.taskId}` : ''}
+                {/* The card's own name, so the panel and the bubble agree. */}
+                {agent.presence.taskTitle ? ` ${agent.presence.taskTitle}` : ''}
               </dd>
             </div>
           ) : null}

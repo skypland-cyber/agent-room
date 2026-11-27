@@ -6,7 +6,7 @@
 // one waiting on the boss stands in the CEO office with a "!" over its head.
 // Nothing is guessed, so the floor never looks busier than the office is.
 import type { OfficeAgentView, OfficeOverview, OfficeTaskRef } from '@agent-room/shared';
-import { officeBaseName } from '@agent-room/shared';
+import { TASK_LEASE_SOON_MS, officeBaseName } from '@agent-room/shared';
 import {
   CEO_WAIT_SPOTS,
   LOUNGE_SPOTS,
@@ -17,6 +17,10 @@ import {
 } from './officeMap.js';
 import { PAIR_LINES, chatTurn, lineIndex, restSeed, restStayFor, restTogether, soloPoolFor, type RestArea } from './idleChat.js';
 import { t } from '../../../i18n/index.js';
+import { taskStateLabel } from '../../../i18n/labels.js';
+
+/** How much of a card's title fits over a head before it stops being a title. */
+export const BUBBLE_TITLE_MAX = 12;
 
 export type SceneZone = 'desk' | 'meeting' | 'ceo' | 'lounge' | 'pantry' | 'overflow';
 export type ScenePose = 'type' | 'stand' | 'sit' | 'coffee' | 'sleep';
@@ -30,9 +34,11 @@ export interface AgentScene {
   tile: { x: number; y: number };
   /** Which way it faces: the pose, not a keyboard. */
   facing: 'up' | 'down' | 'left' | 'right';
-  /** Short line over its head, or null for silence. */
+  /** Short line over its head, or null for silence. `\n` starts a second line. */
   bubble: string | null;
   bubbleTone: BubbleTone;
+  /** 0–100 shown as a thin gauge under a task bubble; absent for chatter. */
+  progress?: number;
   /** The bouncing "!" — the boss owes this agent a decision. */
   needsBoss: boolean;
   /** Offline staff are drawn faded so an empty desk reads as empty. */
@@ -48,19 +54,77 @@ export interface AgentScene {
 
 const norm = (value: string) => officeBaseName(value).toLowerCase();
 
+/** A title short enough to sit in a 96 px bubble, cut on a word where it can. */
+export function bubbleTitle(title: string | undefined, max = BUBBLE_TITLE_MAX): string {
+  const clean = (title ?? '').replace(/\s+/g, ' ').trim();
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max);
+  const space = cut.lastIndexOf(' ');
+  return `${(space >= max - 4 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
+/**
+ * The line over a working agent's head: which card, what state, how far.
+ *
+ * `presence` is the server's own account of the task the agent holds — the title,
+ * the board state, the subtask tally, the lease — so this only chooses words for
+ * facts that are already true. A card's state can be more specific than the
+ * presence status (a claim already submitted still shows "Awaiting review"), and
+ * that specific answer is the one worth reading.
+ */
+export function taskBubble(
+  presence: Pick<OfficeAgentView['presence'], 'taskId' | 'taskTitle' | 'taskState' | 'taskProgress' | 'taskSubtasks' | 'leaseEndsAt'>,
+  status: 'working' | 'reviewing',
+  now: number,
+): string {
+  const id = presence.taskId;
+  if (!id) return t(status === 'reviewing' ? 'pixel.bubble.reviewing' : 'pixel.bubble.typing');
+  const title = bubbleTitle(presence.taskTitle);
+  const head = title ? t('pixel.bubble.taskLine', { id, title }) : id;
+  const progress = presence.taskSubtasks && presence.taskSubtasks.total > 0
+    ? t('pixel.bubble.subtasks', { done: presence.taskSubtasks.done, total: presence.taskSubtasks.total })
+    : `${presence.taskProgress ?? 0}%`;
+  const state = presence.taskState
+    ? taskStateLabel(presence.taskState)
+    : t(status === 'reviewing' ? 'pixel.bubble.stateReviewing' : 'pixel.bubble.stateWorking');
+  const remaining = presence.leaseEndsAt !== undefined ? presence.leaseEndsAt - now : undefined;
+  const lease = now > 0 && remaining !== undefined && remaining > 0 && remaining <= TASK_LEASE_SOON_MS
+    ? t('pixel.bubble.leaseSoon', { minutes: Math.max(1, Math.ceil(remaining / 60_000)) })
+    : '';
+  return [head, `${state} · ${progress}`, ...(lease ? [lease] : [])].join('\n');
+}
+
+/** The tone a task bubble is drawn in: a lease about to lapse outranks a calm status. */
+export function taskBubbleTone(
+  presence: Pick<OfficeAgentView['presence'], 'taskState' | 'leaseEndsAt'>,
+  status: 'working' | 'reviewing',
+  now: number,
+): BubbleTone {
+  const remaining = presence.leaseEndsAt !== undefined ? presence.leaseEndsAt - now : undefined;
+  if (now > 0 && remaining !== undefined && remaining > 0 && remaining <= TASK_LEASE_SOON_MS) return 'warn';
+  if (presence.taskState === 'blocked' || presence.taskState === 'rejected') return 'warn';
+  return status === 'reviewing' ? 'warn' : 'info';
+}
+
 // `norm` folds a decorated room name onto the staff member it belongs to: the
 // board records "Gemini (2)" after a rejoin and "망고 (총괄 매니저)" for the
 // manager, while the roster only knows the plain names. A pose or a bubble must
 // not disappear because the agent happened to be renamed in the room.
 
-/** Work this agent is holding that still asks the boss for a ruling. */
+/**
+ * Work this agent is holding that still asks the boss for a ruling.
+ *
+ * `blocked` belongs here: on this board it is the owner declaring it cannot go on
+ * (see `Task.blocked`), which is exactly a decision the boss owes. A stuck agent
+ * standing in the doorway with a "!" is the floor's way of saying so.
+ */
 export function approvalTasksFor(agent: Pick<OfficeAgentView, 'name'>, overview: Pick<OfficeOverview, 'approvals' | 'openTasks'>): OfficeTaskRef[] {
   const name = norm(agent.name);
   const seen = new Set<string>();
   const out: OfficeTaskRef[] = [];
   for (const task of [...overview.approvals, ...overview.openTasks]) {
     if (!task.owner || norm(task.owner) !== name) continue;
-    if (task.state !== 'pending_approval' && task.state !== 'awaiting_review') continue;
+    if (task.state !== 'pending_approval' && task.state !== 'awaiting_review' && task.state !== 'blocked') continue;
     const key = `${task.code}:${task.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -137,10 +201,9 @@ export function planScenes(
           pose: status === 'working' ? 'type' : 'sleep',
           tile: { x: desk.standX, y: desk.standY },
           facing: 'down',
-          bubble: status === 'working'
-            ? (agent.presence.taskId ? t('pixel.bubble.typingTask', { id: agent.presence.taskId }) : t('pixel.bubble.typing'))
-            : t('pixel.bubble.sleep'),
-          bubbleTone: status === 'working' ? 'info' : 'muted',
+          bubble: status === 'working' ? taskBubble(agent.presence, 'working', now) : t('pixel.bubble.sleep'),
+          bubbleTone: status === 'working' ? taskBubbleTone(agent.presence, 'working', now) : 'muted',
+          ...(status === 'working' && agent.presence.taskProgress !== undefined ? { progress: agent.presence.taskProgress } : {}),
           needsBoss: false,
           alpha: status === 'offline' ? 0.45 : 1,
           deskIndex,
@@ -193,10 +256,9 @@ export function planScenes(
         pose: 'stand',
         tile,
         facing: 'down',
-        bubble: agent.presence.taskId
-          ? t('pixel.bubble.reviewTask', { id: agent.presence.taskId })
-          : t('pixel.bubble.reviewing'),
-        bubbleTone: 'warn',
+        bubble: taskBubble(agent.presence, 'reviewing', now),
+        bubbleTone: taskBubbleTone(agent.presence, 'reviewing', now),
+        ...(agent.presence.taskProgress !== undefined ? { progress: agent.presence.taskProgress } : {}),
         needsBoss: false,
         alpha: 1,
         deskIndex,

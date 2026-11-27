@@ -11,7 +11,7 @@
 // so the same rules run in the browser dashboard, in the serverless function and
 // in tests without a Redis or a clock of their own.
 
-import type { Message, Room, Task as RoomTask } from './types.js';
+import type { Message, Room, Task as RoomTask, TaskState } from './types.js';
 
 /**
  * Ids are generated without crypto so the same helper runs in the browser:
@@ -122,6 +122,55 @@ export interface OfficeAgentPresence {
   /** The task the agent is holding right now, if any. */
   taskId?: string;
   roomCode?: string;
+  /** What that task is called. The floor shows it over the agent's head. */
+  taskTitle?: string;
+  /** Where that task stands on the board. */
+  taskState?: TaskState;
+  /**
+   * When the execution lease on that task runs out.
+   *
+   * Only sent while the lease is live. A lease about to expire is the one piece
+   * of presence that needs acting on — the work is about to be recoverable by
+   * somebody else — so the floor gives it its own colour instead of waiting for
+   * the card to fall back to `todo`.
+   */
+  leaseEndsAt?: number;
+  /** 0–100: subtasks done when the card has any, otherwise the state's stage. */
+  taskProgress?: number;
+  /** The subtask tally `taskProgress` was read from, when the card has subtasks. */
+  taskSubtasks?: { done: number; total: number };
+}
+
+/**
+ * How far along a card is, from its state alone.
+ *
+ * Claiming a task and working on it are the same step on this board (`claim`
+ * moves it to `in_progress`), so both read 50. A rejected card keeps the work
+ * it did but has to come back, hence 60 rather than 80.
+ */
+export const TASK_STATE_PROGRESS: Record<TaskState, number> = {
+  todo: 0,
+  pending_approval: 10,
+  in_progress: 50,
+  paused: 50,
+  blocked: 50,
+  awaiting_review: 80,
+  rejected: 60,
+  done: 100,
+  cancelled: 100,
+  aborted: 100,
+};
+
+/** A lease this close to its end is shown as "about to expire" on the floor. */
+export const TASK_LEASE_SOON_MS = 3 * 60_000;
+
+/** 0–100 progress for one card: its own subtasks when it has them, else its state. */
+export function taskProgressPercent(task: { state?: TaskState; subtasks?: { done: number; total: number } }): number {
+  const subtasks = task.subtasks;
+  if (subtasks && subtasks.total > 0) {
+    return Math.max(0, Math.min(100, Math.round((subtasks.done / subtasks.total) * 100)));
+  }
+  return task.state ? TASK_STATE_PROGRESS[task.state] : 0;
 }
 
 export const OFFICE_AGENT_STATUS_LABEL: Record<OfficeAgentStatus, string> = {
@@ -132,12 +181,37 @@ export const OFFICE_AGENT_STATUS_LABEL: Record<OfficeAgentStatus, string> = {
   offline: 'Offline',
 };
 
+/** One card an agent is holding, as much as presence needs to describe it. */
+export interface AgentTaskActivity {
+  code: string;
+  id: string;
+  title?: string;
+  state?: TaskState;
+  /** When its execution lease runs out, if one is held. */
+  leaseEndsAt?: number;
+  /** Self-ticked breakdown, when the card has one. */
+  subtasks?: { done: number; total: number };
+}
+
 export interface AgentActivity {
   heartbeatAt?: number;
   /** Tasks this agent owns and is executing (in_progress / rejected). */
-  active?: Array<{ code: string; id: string }>;
+  active?: AgentTaskActivity[];
   /** Reviews waiting on this agent. */
-  reviews?: Array<{ code: string; id: string }>;
+  reviews?: AgentTaskActivity[];
+}
+
+/** The presence fields that describe the card an agent is holding. */
+function taskPresence(task: AgentTaskActivity, now: number): Pick<OfficeAgentPresence, 'taskTitle' | 'taskState' | 'leaseEndsAt' | 'taskProgress' | 'taskSubtasks'> {
+  const subtasks = task.subtasks;
+  return {
+    ...(task.title ? { taskTitle: task.title } : {}),
+    ...(task.state ? { taskState: task.state } : {}),
+    // A lease that has already run out is history, not pressure: leave it off.
+    ...(task.leaseEndsAt !== undefined && task.leaseEndsAt > now ? { leaseEndsAt: task.leaseEndsAt } : {}),
+    taskProgress: taskProgressPercent(task),
+    ...(subtasks && subtasks.total > 0 ? { taskSubtasks: { done: subtasks.done, total: subtasks.total } } : {}),
+  };
 }
 
 /**
@@ -160,9 +234,19 @@ export function agentPresence(agent: OfficeAgent, activity: AgentActivity, now: 
     return { status: 'offline', label: 'Offline', ...(heartbeatAgeMs !== undefined ? { heartbeatAgeMs } : {}) };
   }
   const review = activity.reviews?.[0];
-  if (review) return { status: 'reviewing', label: 'Reviewing', heartbeatAgeMs, taskId: review.id, roomCode: review.code };
+  if (review) {
+    return {
+      status: 'reviewing', label: 'Reviewing', heartbeatAgeMs,
+      taskId: review.id, roomCode: review.code, ...taskPresence(review, now),
+    };
+  }
   const active = activity.active?.[0];
-  if (active) return { status: 'working', label: 'Working', heartbeatAgeMs, taskId: active.id, roomCode: active.code };
+  if (active) {
+    return {
+      status: 'working', label: 'Working', heartbeatAgeMs,
+      taskId: active.id, roomCode: active.code, ...taskPresence(active, now),
+    };
+  }
   return { status: 'idle', label: 'Available', heartbeatAgeMs };
 }
 

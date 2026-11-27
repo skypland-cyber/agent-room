@@ -3,9 +3,20 @@ import { isValidCode, type Message } from '@agent-room/shared';
 import * as storage from '@agent-room/upstash-client';
 import { assertHostFor, createRemoteRoomClient, publishBoardNotifications, RemoteRoomApiError } from './_mcpRoomClient.js';
 import { digest, findSeat, withinRateLimit } from './_roomAccess.js';
-import { captureRoomArchive } from './_office.js';
+import { captureRoomArchive, invalidateOfficeOverview } from './_office.js';
 
 const string = (value: unknown) => typeof value === 'string' ? value : '';
+/**
+ * Room-side actions that change a task board (or end the room that holds one).
+ * After them the office dashboard's cached payload no longer describes the
+ * office, so the cache is dropped. Reads are absent on purpose: they are the
+ * cheap half of the API and must not cost a DEL.
+ */
+const boardWriteOperations = new Set([
+  'createTask', 'updateTask', 'reassignTaskRoles', 'cancelTask', 'verifyTask',
+  'resumeTask', 'blockTask', 'endRoom', 'reactivateRoom',
+]);
+
 const hostOperations = new Set([
   'setMuted', 'setReplyMode', 'endRoom', 'reactivateRoom', 'directInvoke', 'hostSkipCurrent',
   'appendSystemMessage', 'createRoomReport', 'createTask', 'updateTask', 'reassignTaskRoles', 'cancelTask',
@@ -169,6 +180,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
     const result = await run(body, store);
+    if (boardWriteOperations.has(String(body.action))) await invalidateOfficeOverview(store);
     return res.status(200).send(JSON.stringify({ result }, (key, value) =>
       ['hostKeyHash', 'seatKeyHash', 'ownerEmail', 'ownerId'].includes(key) ? undefined : value));
   } catch (error) {

@@ -49,8 +49,9 @@ import {
   OfficeApiError,
   assertAgentCapacity,
   audit,
-  buildOverview,
   captureRoomArchive,
+  getCachedOverview,
+  invalidateOfficeOverview,
   mcpGrantCount,
   noteAgentTask,
   officeStore,
@@ -702,6 +703,99 @@ async function handleUsage(store: ReturnType<typeof officeStore>, res: VercelRes
 
 // ─── Entry point ──────────────────────────────────────────────────────────
 
+/**
+ * Everything behind the session cookie, one branch per action.
+ *
+ * Kept out of the handler so the handler has exactly one thing to do after the
+ * branches have run: a write changes what the dashboard would say, so today's
+ * cached payload is dropped there rather than in twenty separate places.
+ */
+async function routeOffice(
+  req: VercelRequest,
+  res: VercelResponse,
+  store: ReturnType<typeof officeStore>,
+  action: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (action === 'login') { await handleLogin(req, res, store); return; }
+  if (action === 'logout') {
+    clearSessionCookie(req, res);
+    await audit(store, OWNER, 'logout');
+    send(res, 200, { authenticated: false });
+    return;
+  }
+
+  const state = officeAuthState();
+  if (!state.configured) {
+    send(res, 503, {
+      error: 'admin_not_configured',
+      message: 'The office is locked until ADMIN_PASSWORD is set on this deployment.',
+      setup: setupInstructions(state),
+    });
+    return;
+  }
+  if (!sessionFromRequest(req)) {
+    send(res, 401, { error: 'login_required', message: 'Sign in with the office password.' });
+    return;
+  }
+
+  // Every authenticated call is counted, and writes separately, because the
+  // dashboard's own polling is what the free tier's command budget pays for.
+  if (WRITE_ACTIONS.has(action)) await office.bumpUsage(store, kstDay(Date.now()), 'writes').catch(() => 0);
+  await office.bumpUsage(store, kstDay(Date.now()), 'requests').catch(() => 0);
+
+  if (action === 'overview') {
+    // `freshness: 'fresh'` is the boss asking again by hand (or straight after a
+    // write): skip the cached copy, rebuild, and leave the new answer for the
+    // polls. Anything else — including a client that sends nothing — reads
+    // through the cache, which is the default because polling is the cost.
+    const { overview, cache } = await getCachedOverview(store, {
+      withoutRooms: bool(body.withoutRooms),
+      ownerName: 'owner',
+      fresh: str(body.freshness, 20) === 'fresh',
+    });
+    res.setHeader('X-Office-Cache', cache);
+    send(res, 200, { overview });
+    return;
+  }
+  if (action === 'rooms.list') { send(res, 200, { rooms: await roomSummaries(store) }); return; }
+  if (action === 'rooms.end' || action === 'rooms.delete') { await handleRooms(store, action, body, res); return; }
+  if (action === 'audit.list') {
+    // `body.action` is the router's opcode ("audit.list"); the log's action
+    // filter is a separate field, or a `filter` object for convenience.
+    const filter = (body.filter ?? {}) as Record<string, unknown>;
+    const actionPrefix = str(body.filterAction) || str(filter.action);
+    const entries = filterAudit(await office.readAudit(store, 500), {
+      ...(str(body.actor) || str(filter.actor) ? { actor: str(body.actor) || str(filter.actor) } : {}),
+      ...(actionPrefix ? { action: actionPrefix } : {}),
+      ...(str(body.target) || str(filter.target) ? { target: str(body.target) || str(filter.target) } : {}),
+      ...(str(body.roomCode) || str(filter.roomCode) ? { roomCode: str(body.roomCode) || str(filter.roomCode) } : {}),
+      ...(num(body.from ?? filter.from) !== undefined ? { from: num(body.from ?? filter.from) } : {}),
+      ...(num(body.to ?? filter.to) !== undefined ? { to: num(body.to ?? filter.to) } : {}),
+      limit: num(body.limit ?? filter.limit) ?? 100,
+    });
+    send(res, 200, { entries });
+    return;
+  }
+  if (action === 'settings.get') { send(res, 200, { settings: await office.getOfficeSettings(store) }); return; }
+  if (action === 'settings.save') {
+    const settings = await office.saveOfficeSettings(store, (body.settings ?? body) as Record<string, unknown>);
+    await audit(store, OWNER, 'settings.save', { detail: `budget ${settings.dailyRequestBudget}` });
+    send(res, 200, { settings });
+    return;
+  }
+  if (action === 'settings.defaults') { send(res, 200, { settings: normalizeOfficeSettings({}) }); return; }
+  if (action === 'usage.get') { await handleUsage(store, res); return; }
+  if (action.startsWith('agents.')) { await handleAgents(store, action, body, res); return; }
+  if (action.startsWith('projects.')) { await handleProjects(store, action, body, res); return; }
+  if (action.startsWith('tasks.')) { await handleTasks(store, action, body, res); return; }
+  if (action.startsWith('archives.')) { await handleArchives(store, action, body, res); return; }
+  if (action.startsWith('templates.')) { await handleTemplates(store, action, body, res); return; }
+  if (action.startsWith('backup.')) { await handleBackup(store, action, body, res); return; }
+
+  throw new OfficeApiError(`Unknown office action "${action}".`, 400, 'bad_request');
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -730,74 +824,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
 
-    if (action === 'login') { await handleLogin(req, res, store); return; }
-    if (action === 'logout') {
-      clearSessionCookie(req, res);
-      await audit(store, OWNER, 'logout');
-      send(res, 200, { authenticated: false });
-      return;
-    }
-
-    const state = officeAuthState();
-    if (!state.configured) {
-      send(res, 503, {
-        error: 'admin_not_configured',
-        message: 'The office is locked until ADMIN_PASSWORD is set on this deployment.',
-        setup: setupInstructions(state),
-      });
-      return;
-    }
-    if (!sessionFromRequest(req)) {
-      send(res, 401, { error: 'login_required', message: 'Sign in with the office password.' });
-      return;
-    }
-
-    // Every authenticated call is counted, and writes separately, because the
-    // dashboard's own polling is what the free tier's command budget pays for.
-    if (WRITE_ACTIONS.has(action)) await office.bumpUsage(store, kstDay(Date.now()), 'writes').catch(() => 0);
-    await office.bumpUsage(store, kstDay(Date.now()), 'requests').catch(() => 0);
-
-    if (action === 'overview') {
-      const overview = await buildOverview(store, { withoutRooms: bool(body.withoutRooms), ownerName: 'owner' });
-      send(res, 200, { overview });
-      return;
-    }
-    if (action === 'rooms.list') { send(res, 200, { rooms: await roomSummaries(store) }); return; }
-    if (action === 'rooms.end' || action === 'rooms.delete') { await handleRooms(store, action, body, res); return; }
-    if (action === 'audit.list') {
-      // `body.action` is the router's opcode ("audit.list"); the log's action
-      // filter is a separate field, or a `filter` object for convenience.
-      const filter = (body.filter ?? {}) as Record<string, unknown>;
-      const actionPrefix = str(body.filterAction) || str(filter.action);
-      const entries = filterAudit(await office.readAudit(store, 500), {
-        ...(str(body.actor) || str(filter.actor) ? { actor: str(body.actor) || str(filter.actor) } : {}),
-        ...(actionPrefix ? { action: actionPrefix } : {}),
-        ...(str(body.target) || str(filter.target) ? { target: str(body.target) || str(filter.target) } : {}),
-        ...(str(body.roomCode) || str(filter.roomCode) ? { roomCode: str(body.roomCode) || str(filter.roomCode) } : {}),
-        ...(num(body.from ?? filter.from) !== undefined ? { from: num(body.from ?? filter.from) } : {}),
-        ...(num(body.to ?? filter.to) !== undefined ? { to: num(body.to ?? filter.to) } : {}),
-        limit: num(body.limit ?? filter.limit) ?? 100,
-      });
-      send(res, 200, { entries });
-      return;
-    }
-    if (action === 'settings.get') { send(res, 200, { settings: await office.getOfficeSettings(store) }); return; }
-    if (action === 'settings.save') {
-      const settings = await office.saveOfficeSettings(store, (body.settings ?? body) as Record<string, unknown>);
-      await audit(store, OWNER, 'settings.save', { detail: `budget ${settings.dailyRequestBudget}` });
-      send(res, 200, { settings });
-      return;
-    }
-    if (action === 'settings.defaults') { send(res, 200, { settings: normalizeOfficeSettings({}) }); return; }
-    if (action === 'usage.get') { await handleUsage(store, res); return; }
-    if (action.startsWith('agents.')) { await handleAgents(store, action, body, res); return; }
-    if (action.startsWith('projects.')) { await handleProjects(store, action, body, res); return; }
-    if (action.startsWith('tasks.')) { await handleTasks(store, action, body, res); return; }
-    if (action.startsWith('archives.')) { await handleArchives(store, action, body, res); return; }
-    if (action.startsWith('templates.')) { await handleTemplates(store, action, body, res); return; }
-    if (action.startsWith('backup.')) { await handleBackup(store, action, body, res); return; }
-
-    throw new OfficeApiError(`Unknown office action "${action}".`, 400, 'bad_request');
+    await routeOffice(req, res, store, action, body);
+    // The write has landed: drop today's cached dashboard so the next poll (and
+    // not the poll after the TTL) shows it. A failed write threw above and kept
+    // the cache, which is still an honest picture of the office.
+    if (WRITE_ACTIONS.has(action)) await invalidateOfficeOverview(store);
   } catch (error) {
     fail(res, error);
   }

@@ -11,6 +11,10 @@
 // Plain arithmetic, no canvas: the renderer measures the text, this decides where
 // the box goes, and a test can check both without a browser.
 export const BUBBLE_HEIGHT = 13;
+/** Distance between the baselines of two lines inside one bubble. */
+export const BUBBLE_LINE_STEP = 11;
+/** Height reserved at the bottom of a bubble that carries a progress gauge. */
+export const BUBBLE_GAUGE_HEIGHT = 4;
 export const BUBBLE_MAX_WIDTH = 96;
 export const BUBBLE_MIN_WIDTH = 14;
 /** The gap between a bubble's bottom and the name tag over the speaker's head. */
@@ -27,7 +31,19 @@ export interface BubbleRequest {
   x: number;
   /** Where the bottom of the bubble would sit: above the speaker's name tag. */
   bottomY: number;
+  /** The line to show. A `\n` starts a second line, which is how a task bubble says both what and how far. */
   text: string;
+}
+
+/** The lines of a bubble: one per `\n`, empty ones dropped. */
+export function bubbleLines(text: string): string[] {
+  const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  return lines.length > 0 ? lines : [''];
+}
+
+/** The box height for a bubble of this many lines. */
+export function bubbleHeight(lineCount: number): number {
+  return BUBBLE_HEIGHT + Math.max(0, lineCount - 1) * BUBBLE_LINE_STEP;
 }
 
 export interface BubblePlacement {
@@ -76,32 +92,35 @@ export function layoutBubbles(requests: BubbleRequest[], options: BubbleLayoutOp
   const ordered = [...requests].sort((a, b) => (a.bottomY - b.bottomY) || (a.x - b.x));
 
   for (const request of ordered) {
-    const width = bubbleWidth(widthOf(request.text));
+    const lines = bubbleLines(request.text);
+    // A two-line bubble is as wide as its wider line, never both at once.
+    const width = bubbleWidth(Math.max(...lines.map(line => widthOf(line))));
+    const height = bubbleHeight(lines.length);
     // Keep the whole box on the map, not just its centre.
     const left = Math.round(Math.min(
       Math.max(request.x - width / 2, EDGE_MARGIN),
       Math.max(EDGE_MARGIN, mapWidth - EDGE_MARGIN - width),
     ));
-    let top = Math.round(request.bottomY - BUBBLE_HEIGHT);
-    top = Math.max(EDGE_MARGIN, Math.min(top, mapHeight - EDGE_MARGIN - BUBBLE_HEIGHT));
+    let top = Math.round(request.bottomY - height);
+    top = Math.max(EDGE_MARGIN, Math.min(top, mapHeight - EDGE_MARGIN - height));
 
     for (let stack = 0; stack < MAX_STACKS; stack += 1) {
-      const candidate: Rect = { left, right: left + width, top, bottom: top + BUBBLE_HEIGHT };
+      const candidate: Rect = { left, right: left + width, top, bottom: top + height };
       const clash = placed.some(row => overlaps(row.rect, candidate));
       if (!clash) break;
-      top = candidate.top - (BUBBLE_HEIGHT + BUBBLE_GAP);
+      top = candidate.top - (height + BUBBLE_GAP);
       // Never stack a bubble off the top of the map: leave it where it is instead.
       if (top < EDGE_MARGIN) { top = EDGE_MARGIN; break; }
     }
 
     placed.push({
-      rect: { left, right: left + width, top, bottom: top + BUBBLE_HEIGHT },
+      rect: { left, right: left + width, top, bottom: top + height },
       placement: {
         id: request.id,
         left,
         top,
         width,
-        height: BUBBLE_HEIGHT,
+        height,
         tailX: Math.round(Math.min(Math.max(request.x, left + 4), left + width - 4)),
         anchorY: Math.round(request.bottomY),
       },
