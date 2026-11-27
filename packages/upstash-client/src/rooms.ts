@@ -792,6 +792,25 @@ export async function endRoom(
   }));
 }
 
+/**
+ * Delete every Redis key a room owns: the room record, its transcript and the
+ * message counter, its task board, turn state, report and webhook list.
+ *
+ * Attachment objects live outside Redis (Vercel Blob / R2) and are not touched
+ * here; the upload layer removes those (api/delete-room-blobs.ts). Auxiliary
+ * per-room keys are written with the room's TTL, so nothing that this misses
+ * can outlive the room by more than its own expiry.
+ */
+export async function deleteRoomData(
+  client: UpstashClient,
+  code: string,
+): Promise<void> {
+  await client.pipeline([
+    ['DEL', roomKey(code), `room-msgs:${code}`, `room-msg-count:${code}`, `task-board:${code}`,
+      `turn-state:${code}`, `room-report:${code}`, `room-webhooks:${code}`],
+  ]);
+}
+
 export async function reactivateRoom(
   client: UpstashClient,
   code: string,
