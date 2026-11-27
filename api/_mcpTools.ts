@@ -519,6 +519,32 @@ export async function listMessagesResilient(
 }
 
 /**
+ * A heartbeat that survives a blip.
+ *
+ * Presence is written fire-and-forget on the listen path, which is right — a
+ * seat's poll must not wait on it. But a single failed write used to be the
+ * whole record of that seat's liveness for the next 30-second window, and the
+ * dashboard would draw it going quiet for no reason. Two short retries (200ms,
+ * 400ms) ride out the blip without ever delaying the listen that triggered them.
+ */
+export async function heartbeatWithRetry(
+  store: Parameters<typeof recordAgentHeartbeat>[0],
+  input: Parameters<typeof recordAgentHeartbeat>[1],
+): Promise<Awaited<ReturnType<typeof recordAgentHeartbeat>>> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await recordAgentHeartbeat(store, input);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 2) break;
+      await new Promise(resolve => setTimeout(resolve, backoffDelayMs(attempt, { baseMs: 200, maxMs: 800 })));
+    }
+  }
+  throw lastError;
+}
+
+/**
  * Owns the presence lease; the polling itself is runListenInner. Renewing while
  * we poll and releasing in `finally` means every exit path (message, quiet
  * timeout, throw, function instance torn down) stops advertising "Listening".
@@ -1427,7 +1453,7 @@ async function dispatch(
       // Office presence: a join is the first heartbeat of a session. Awaited
       // here (not fire-and-forget as on the listen path) because the answer is
       // what tells a returning seat it was away and what it left unfinished.
-      const link = await recordAgentHeartbeat(client.store, { name: finalName, roomCode: a.code, at: Date.now() })
+      const link = await heartbeatWithRetry(client.store, { name: finalName, roomCode: a.code, at: Date.now() })
         .catch(() => ({ recorded: false } as { recorded: boolean; reconnected?: boolean; gapMs?: number }));
       const reconnect = link.reconnected && link.gapMs !== undefined
         ? { state: 'reconnected' as const, downMs: link.gapMs }
@@ -1590,7 +1616,7 @@ async function dispatch(
       // Presence for the office dashboard. Throttled inside the store (one write
       // per 30s per name), so a fast listen loop costs one read, not one write.
       if (selfName) {
-        void recordAgentHeartbeat(client.store, { name: selfName, roomCode: a.code, at: Date.now() })
+        void heartbeatWithRetry(client.store, { name: selfName, roomCode: a.code, at: Date.now() })
           .catch(() => ({ recorded: false }));
       }
       // timeoutMs: 0 → non-blocking history read (the old room_list_messages).

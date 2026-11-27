@@ -80,6 +80,19 @@ describe('rejoining after a gap', () => {
   });
 });
 
+describe('a heartbeat that failed once', () => {
+  it('is retried, so a single blip does not make the seat look gone', async () => {
+    const { client } = await seededRoom();
+    const { readHeartbeat } = await import('@agent-room/upstash-client');
+    const { heartbeatWithRetry } = await import('./_mcpTools.js');
+    // The first write of the stamp fails; the retry lands.
+    fake.failOnce(command => command[0] === 'SET' && String(command[1]).includes('office:v1:heartbeat'));
+    const result = await heartbeatWithRetry(client.store, { name: 'Qwen', roomCode: CODE, at: Date.now(), throttleMs: 0 });
+    expect(result.recorded).toBe(true);
+    expect((await readHeartbeat(client.store, 'Qwen'))?.roomCode).toBe(CODE);
+  });
+});
+
 describe('a listen that had to retry its storage read', () => {
   it('recovers, says how long it was down, and still returns the messages', async () => {
     const { client } = await seededRoom();
