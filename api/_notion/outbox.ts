@@ -215,11 +215,9 @@ export async function drainOutbox(store: UpstashClient, options: DrainOptions): 
       continue;
     }
     let outcome: { ok: boolean; action?: string; pageId?: string; reason?: string };
-    let failure: unknown;
     try {
       outcome = await options.run(item.event);
     } catch (error) {
-      failure = error;
       outcome = { ok: false, reason: error instanceof Error ? error.message : 'failed' };
     }
     if (outcome.ok) {
@@ -254,7 +252,6 @@ export async function drainOutbox(store: UpstashClient, options: DrainOptions): 
     const result: DrainResult = { id, ok: false, attempts, dead, error: message };
     results.push(result);
     if (options.onResult) await options.onResult(result, item.event);
-    void failure;
   }
   return results;
 }
