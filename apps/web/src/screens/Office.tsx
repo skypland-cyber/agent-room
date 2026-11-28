@@ -19,6 +19,7 @@ import { OfficeProjectsPanel } from '../components/office/OfficeProjectsPanel.js
 import { OfficeWorkPanel } from '../components/office/OfficeWorkPanel.js';
 import { OfficeArchivePanel } from '../components/office/OfficeArchivePanel.js';
 import { OfficeAutomationPanel } from '../components/office/OfficeAutomationPanel.js';
+import { OfficeWorkshopRoutines } from '../components/office/OfficeWorkshopRoutines.js';
 import { OfficeSettingsPanel } from '../components/office/OfficeSettingsPanel.js';
 import { UsageGauge } from '../components/office/OfficeTodayCard.js';
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, SectionTitle, formatDate, timeAgo, useVisibleInterval } from '../components/office/ui.js';
@@ -66,6 +67,7 @@ export function Office() {
   const [error, setError] = useState<unknown>(null);
   const [selectedAgent, setSelectedAgent] = useState<string | undefined>();
   const [lastRefresh, setLastRefresh] = useState<number | null>(null);
+  const [templatesError, setTemplatesError] = useState(false);
   const [templates, setTemplates] = useState<OfficeTemplate[] | null>(null);
   /**
    * The newest request wins: a poll that started before a manual refresh must not
@@ -105,7 +107,12 @@ export function Office() {
   useEffect(() => {
     if (tab !== 'recurring') return;
     let alive = true;
-    void listTemplates().then(rows => { if (alive) setTemplates(rows); }).catch(() => { if (alive) setTemplates([]); });
+    setTemplatesError(false);
+    void listTemplates().then(rows => {
+      if (alive) setTemplates(rows);
+    }).catch(() => {
+      if (alive) setTemplatesError(true);
+    });
     return () => { alive = false; };
   }, [tab, overview?.counts.templates]);
 
@@ -320,12 +327,15 @@ export function Office() {
         ) : tab === 'record' ? (
           <OfficeArchivePanel onChanged={onChanged} />
         ) : tab === 'recurring' ? (
-          templates ? (
-            <OfficeAutomationPanel
-              templates={templates}
-              onChanged={() => { void onChanged(); void listTemplates().then(setTemplates).catch(() => undefined); }}
-            />
-          ) : <Card><Empty>{t('office.loading.templates')}</Empty></Card>
+          <div className="grid gap-4">
+            <OfficeWorkshopRoutines />
+            {templatesError ? <Card><Empty>{t('workshop.templatesError')}</Empty></Card> : templates ? (
+              <OfficeAutomationPanel
+                templates={templates}
+                onChanged={() => { void onChanged(); void listTemplates().then(setTemplates).catch(() => setTemplatesError(true)); }}
+              />
+            ) : <Card><Empty>{t('office.loading.templates')}</Empty></Card>}
+          </div>
         ) : (
           <OfficeSettingsPanel overview={overview} onChanged={onChanged} />
         )}

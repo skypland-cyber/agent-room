@@ -10,6 +10,7 @@ import {
 import { Badge, Button, Card, ErrorNote, Field, Input, SectionTitle, useOfficeAction } from './ui.js';
 import { getLanguage, useI18n } from '../../i18n/index.js';
 import { message, usageNotesText } from '../../i18n/errors.js';
+import { OfficeNotionCard } from './OfficeNotionCard.js';
 
 interface Props {
   overview: OfficeOverview;
@@ -116,6 +117,7 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
 
   return (
     <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
+      <OfficeNotionCard />
       <Card>
         <SectionTitle title={t('limits.usage.title')} hint={t('limits.usage.hint')} />
         <div className="rounded-xl border border-border-faint bg-surface-soft p-3">

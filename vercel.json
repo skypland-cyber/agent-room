@@ -3,7 +3,8 @@
   "outputDirectory": "apps/web/dist",
   "framework": null,
   "crons": [
-    { "path": "/api/notion?action=cron", "schedule": "0 15 * * *" }
+    { "path": "/api/notion?action=cron", "schedule": "0 15 * * *" },
+    { "path": "/api/notion?action=reportCron", "schedule": "0 0 * * *" }
   ],
   "rewrites": [
     {
