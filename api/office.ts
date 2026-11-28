@@ -15,11 +15,12 @@
 // what to set — a missing password must never mean an open office.
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { generateCode, isValidCode } from '@agent-room/shared';
-import type { ClientKind, Task, TaskBoard } from '@agent-room/shared';
+import type { ClientKind, Message, OfficeChatMessage, OfficeRoomChat, Task, TaskBoard } from '@agent-room/shared';
 import {
   OfficeInputError,
   archiveMatches,
   archiveSnippet,
+  buildRoomDigest,
   filterAudit,
   kstDay,
   normalizeAgentInput,
@@ -64,6 +65,7 @@ import {
   seatAgents,
   storageConfigured,
   sweepAutoCloseRooms,
+  syncRoomAutoClose,
 } from './_office.js';
 
 export const maxDuration = 60;
@@ -78,7 +80,7 @@ const WRITE_ACTIONS = new Set([
   'projects.guideline.add', 'projects.guideline.update', 'projects.guideline.delete', 'projects.link',
   'tasks.pause', 'tasks.resume', 'tasks.abort', 'tasks.approve', 'tasks.reject', 'tasks.retry', 'tasks.qa', 'tasks.requestApproval',
   'archives.capture', 'archives.delete',
-  'rooms.end', 'rooms.delete', 'rooms.handoff',
+  'rooms.end', 'rooms.delete', 'rooms.handoff', 'rooms.say',
   'templates.save', 'templates.delete', 'templates.apply',
   'settings.save',
   'backup.restore',
@@ -514,6 +516,8 @@ async function handleTasks(store: ReturnType<typeof officeStore>, action: string
  * dashboard instead of sitting there as an empty ended room.
  */
 async function handleRooms(store: ReturnType<typeof officeStore>, action: string, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
+  if (action === 'rooms.chat') { await handleRoomChat(store, body, res); return; }
+  if (action === 'rooms.say') { await handleRoomSay(store, body, res); return; }
   if (action !== 'rooms.end' && action !== 'rooms.delete' && action !== 'rooms.handoff') {
     throw new OfficeApiError(`Unknown rooms action ${action}.`, 400, 'bad_request');
   }
@@ -566,6 +570,154 @@ async function handleRooms(store: ReturnType<typeof officeStore>, action: string
       + (archived ? ` · ${deliverables.length} deliverables kept in archive ${archived.id}` : ''),
   });
   send(res, 200, { deleted: true, ...summary, ...(archived ? { archiveId: archived.id, keptDeliverables: deliverables.length } : {}) });
+}
+
+/** How many messages the chat keeps in the browser at once, and how wide a single
+ * poll's window may be before the panel is told to start over. */
+export const ROOM_CHAT_TAIL = 40;
+export const ROOM_CHAT_MAX_CATCHUP = 200;
+/** How much of the transcript the minutes are read from. */
+const ROOM_DIGEST_WINDOW = 200;
+
+function chatMessage(message: Message): OfficeChatMessage {
+  return {
+    id: message.id,
+    type: message.type,
+    name: message.name,
+    role: message.role ?? '',
+    color: message.color,
+    initials: message.initials,
+    client: message.client,
+    text: message.text.slice(0, 4000),
+    time: message.time,
+    ...(message.attachments?.length
+      ? { attachments: message.attachments.slice(0, 6).map(file => ({
+        id: file.id, name: file.name, type: file.type, mime: file.mime, size: file.size,
+      })) }
+      : {}),
+    ...(message.metadata?.eventType ? { event: message.metadata.eventType } : {}),
+  };
+}
+
+/**
+ * The room as the chat panel holds it: the conversation, and on request the
+ * minutes cut from the same transcript.
+ *
+ * The panel is the one office screen that polls quickly (an agent answering is
+ * only useful to watch while it answers), so this action reads as little as it
+ * can per poll: no board, no archive index and no office overview unless the
+ * 회의록 tab asks for the board (`digest: true`). `since` is the absolute message
+ * cursor the panel already holds, which makes a quiet poll two Redis commands.
+ */
+async function handleRoomChat(store: ReturnType<typeof officeStore>, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
+  const code = requireCode(body);
+  const room = await office.getRoom(store, code);
+  const total = await office.getMessageTotalCount(store, code);
+  const since = num(body.since);
+
+  let messages: Message[];
+  let reset = false;
+  if (total === null) {
+    // A room old enough to predate the counter: its length is the only cursor.
+    const all = await office.listMessages(store, code, 0);
+    reset = since !== undefined;
+    messages = all.slice(-ROOM_CHAT_TAIL);
+  } else if (since !== undefined && since >= 0 && since <= total && total - since <= ROOM_CHAT_MAX_CATCHUP) {
+    messages = since === total ? [] : await office.listMessages(store, code, since);
+  } else {
+    // First read, or a poll that fell too far behind to be a conversation.
+    reset = since !== undefined;
+    messages = await office.listMessages(store, code, Math.max(0, total - ROOM_CHAT_TAIL));
+  }
+
+  const payload: OfficeRoomChat = {
+    room: {
+      code: room.code,
+      topic: room.topic,
+      status: room.status,
+      createdBy: room.createdBy,
+      createdAt: room.createdAt,
+      ...(room.endedAt ? { endedAt: room.endedAt } : {}),
+      replyMode: room.replyMode ?? 'open',
+      participants: room.participants.map(person => ({
+        name: person.name,
+        role: person.role ?? '',
+        client: person.client,
+        isHost: person.name === room.createdBy,
+        muted: person.canSpeak === false,
+      })),
+    },
+    messages: messages.map(chatMessage),
+    total: total ?? (since ?? 0) + messages.length,
+    ...(reset ? { reset: true } : {}),
+  };
+
+  if (bool(body.digest)) {
+    // The minutes read the last stretch of the same conversation, not the poll's
+    // window: a decision from this morning still belongs in today's minutes.
+    const floor = total === null ? 0 : Math.max(0, total - ROOM_DIGEST_WINDOW);
+    const window = total !== null && floor === 0 && messages.length >= Math.max(0, (total ?? 0) - ROOM_CHAT_TAIL)
+      ? [...messages]
+      : await office.listMessages(store, code, floor);
+    const board = await office.getTaskBoard(store, code).catch(() => null);
+    payload.digest = buildRoomDigest({ messages: window, tasks: board?.tasks ?? [] });
+  }
+
+  send(res, 200, payload);
+}
+
+/**
+ * "팀에게 말하기": the boss writes into the room from the office.
+ *
+ * The line is posted as the room's host, because that is who is speaking — the
+ * session cookie is the office owner's, and the room belongs to them. Where the
+ * host already holds a web seat it is posted through the ordinary append path,
+ * so the room's mute gate and its turn machinery (a human message starts a turn
+ * in sequential rooms) apply exactly as they do in the room screen. Where the
+ * host has no seat — a room opened by an agent — the message is appended the way
+ * the office already writes its handoff notes, without minting a seat that would
+ * claim the host's name away from the browser that may be holding it.
+ */
+async function handleRoomSay(store: ReturnType<typeof officeStore>, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
+  const code = requireCode(body);
+  const text = str(body.text, 4000);
+  if (!text) throw new OfficeInputError('Write something to send it to the room.', 'text');
+  const room = await office.getRoom(store, code);
+  if (room.status !== 'active') {
+    throw new OfficeApiError('This room is closed, so nothing can be posted to it.', 409, 'room_ended');
+  }
+
+  // The boss speaks as the room's host and nobody else: a guest's web seat is
+  // not the owner's, and posting under it would put words in that person's mouth.
+  const seat = room.participants.find(person => person.client === 'web' && person.canSpeak !== false
+    && person.name.trim().toLowerCase() === room.createdBy.trim().toLowerCase());
+  const name = seat?.name ?? room.createdBy;
+  const message: Message = {
+    id: Date.now(),
+    type: 'msg',
+    name,
+    role: seat?.role || 'Host',
+    color: seat?.color || '#0f172a',
+    initials: seat?.initials || name.split(/\s+/).map(part => part[0] ?? '').join('').slice(0, 2).toUpperCase() || 'OW',
+    client: 'web',
+    text,
+    time: Date.now(),
+  };
+
+  if (seat) {
+    const appended = await office.appendMessage(store, code, message);
+    if (appended.appended === false) {
+      throw new OfficeInputError('That message was taken as a room control token, not as speech.', 'text');
+    }
+  } else {
+    await office.appendSystemMessage(store, code, message);
+  }
+
+  // Typing into a room whose work is done moves its auto-close deadline out,
+  // exactly as it does in the room screen; the office is the other way in.
+  await syncRoomAutoClose(store, code).catch(() => undefined);
+  await audit(store, OWNER, 'room.say', { roomCode: code, detail: text.slice(0, 120) });
+  send(res, 200, { message: chatMessage(message), total: (await office.getMessageTotalCount(store, code).catch(() => null)) ?? undefined });
 }
 
 async function handleArchives(store: ReturnType<typeof officeStore>, action: string, body: Record<string, unknown>, res: VercelResponse): Promise<void> {
@@ -926,7 +1078,11 @@ async function routeOffice(
     send(res, 200, { rooms: await roomSummaries(store) });
     return;
   }
-  if (action === 'rooms.end' || action === 'rooms.delete' || action === 'rooms.handoff') { await handleRooms(store, action, body, res); return; }
+  if (action === 'rooms.end' || action === 'rooms.delete' || action === 'rooms.handoff'
+      || action === 'rooms.chat' || action === 'rooms.say') {
+    await handleRooms(store, action, body, res);
+    return;
+  }
   if (action === 'audit.list') {
     // `body.action` is the router's opcode ("audit.list"); the log's action
     // filter is a separate field, or a `filter` object for convenience.

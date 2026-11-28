@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   OFFICE_DEFAULT_SETTINGS,
   OFFICE_HEARTBEAT_STALE_MS,
+  ROOM_DIGEST_ITEM_LIMIT,
   TASK_LEASE_SOON_MS,
   TASK_STATE_PROGRESS,
   agentPresence,
   archiveMatches,
   archiveSnippet,
   buildMinutes,
+  buildRoomDigest,
   filterAudit,
   kstDay,
   normalizeAgentInput,
@@ -264,6 +266,51 @@ describe('meeting minutes and archive search', () => {
     expect(archiveMatches(archive, '상패 없는말')).toBe(false);
     expect(archiveMatches(archive, '')).toBe(true);
     expect(archiveSnippet(archive, 'Prime Gift')).toContain('Prime Gift');
+  });
+});
+
+describe('live room digest', () => {
+  const messages: Message[] = [
+    { id: 1, name: 'Host', role: 'host', color: 'blue', initials: 'H', client: 'web', type: 'msg', text: 'Kickoff', time: now },
+    { id: 2, name: 'Qwen', role: 'agent', color: 'green', initials: 'Q', client: 'cc', type: 'msg', text: '[DECISION] 황동 도금으로 간다', time: now + 1000 },
+    { id: 3, name: 'Pixel', role: 'agent', color: 'amber', initials: 'P', client: 'cc', type: 'msg', text: '[TODO]\n  인쇄 파일\n보내기', time: now + 2000 },
+    { id: 4, name: 'Qwen', role: 'agent', color: 'green', initials: 'Q', client: 'cc', type: 'msg', text: '[RESULT] 시안 2종 완성', time: now + 3000 },
+    { id: 5, name: 'Pixel', role: 'agent', color: 'amber', initials: 'P', client: 'cc', type: 'sys', text: '[DECISION]', time: now + 4000 },
+  ];
+  const digest = buildRoomDigest({
+    messages,
+    tasks: [
+      { id: 'T-01', title: 'Draft copy', state: 'done', owner: 'Qwen' } as never,
+      { id: 'T-02', title: 'Design cover', state: 'pending_approval', owner: 'Pixel' } as never,
+    ],
+  });
+
+  it('reads the tagged lines into sections with the tag peeled off', () => {
+    expect(digest.messageCount).toBe(5);
+    expect(digest.decisions.map(item => item.text)).toEqual(['황동 도금으로 간다']);
+    expect(digest.openItems[0]).toMatchObject({ name: 'Pixel', text: '인쇄 파일 보내기' });
+    expect(digest.results.map(item => item.text)).toEqual(['시안 2종 완성']);
+  });
+
+  it('drops a line that is nothing but its tag instead of showing an empty heading', () => {
+    expect(digest.decisions).toHaveLength(1);
+  });
+
+  it('counts the board the way the panel prints it', () => {
+    expect(digest.board).toEqual({ total: 2, done: 1, open: 1, pendingApproval: 1 });
+    expect(digest.tasks[0]).toEqual({ id: 'T-01', title: 'Draft copy', state: 'done', owner: 'Qwen' });
+  });
+
+  it('keeps only the newest items of each section and lists speakers once, in order', () => {
+    const many: Message[] = Array.from({ length: ROOM_DIGEST_ITEM_LIMIT + 4 }, (_, index) => ({
+      id: index, name: index % 2 ? 'Qwen' : 'Pixel', role: 'agent', color: 'green', initials: 'Q',
+      client: 'cc' as const, type: 'msg' as const, text: `[DECISION] 결정 ${index}`, time: now + index,
+    }));
+    const built = buildRoomDigest({ messages: many });
+    expect(built.decisions).toHaveLength(ROOM_DIGEST_ITEM_LIMIT);
+    expect(built.decisions.at(-1)!.text).toBe(`결정 ${many.length - 1}`);
+    expect(built.participants).toEqual(['Pixel', 'Qwen']);
+    expect(built.board).toEqual({ total: 0, done: 0, open: 0, pendingApproval: 0 });
   });
 });
 

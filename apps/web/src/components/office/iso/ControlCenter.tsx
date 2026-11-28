@@ -23,7 +23,7 @@ import type { OfficeAgentView, OfficeOverview } from '@agent-room/shared';
 import { ISO_ZONES, type IsoZoneId } from './isoPlan.js';
 import { isoAlerts, planIso, podBindings } from './isoScene.js';
 import { IsoStage, type StageMode } from './IsoStage.js';
-import { OfficeDiorama } from './OfficeDiorama.js';
+import { DioramaView } from './DioramaView.js';
 import { lightSpec, nextLightMode, type LightMode } from './isoLight.js';
 import { realityCounts, realityOf } from './isoReality.js';
 import { Badge, Button, Card, timeAgo } from '../ui.js';
@@ -131,7 +131,7 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
         <Button type="button" variant="ghost" className="!w-full !justify-center whitespace-nowrap sm:!w-auto" aria-pressed={!diorama} onClick={() => setDiorama(false)}>{tr('diorama.standard')}</Button>
         <Button type="button" variant="ghost" className="!w-full !justify-center whitespace-nowrap sm:!w-auto" aria-pressed={diorama} onClick={() => setDiorama(true)}>{tr('diorama.view')}</Button>
       </div>
-      {diorama ? <OfficeDiorama agents={agents} generatedAt={overview.generatedAt} /> : (
+      {diorama ? <DioramaView overview={overview} agents={agents} now={clock} onOpenRoom={onOpenRoom} /> : (
     <div className={mode === 'observe' ? '' : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_318px]'}>
       <div className="grid gap-2">
         <IsoStage

@@ -12,13 +12,20 @@
 // a 390px phone and a 1280px desk show the same room, just larger. Tags are sized
 // in CSS pixels (a 9px label stays 9px), which is why the seats were picked far
 // enough apart that the six of them never touch on a phone.
-import { useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+
+/**
+ * `useLayoutEffect` measures before the frame is painted — but on a server render
+ * there is nothing to measure and React warns, so the server gets the no-op.
+ */
+const useMeasureEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 import type { OfficeAgentView } from '@agent-room/shared';
 import { useI18n, type MessageKey } from '../../../i18n/index.js';
 import { presenceLabel } from '../../../i18n/labels.js';
 import { ConnectionBadge } from '../ConnectionBadge.js';
 import { DioramaCritter } from './DioramaCritter.js';
 import { placeAgents } from './dioramaSeats.js';
+import { layoutDioramaBubbles, settleTags, type BubblePlacement, type SpeechCandidate, type StageBox } from './dioramaBubbles.js';
 
 const TONE = {
   working: '#0ea5e9',
@@ -56,7 +63,17 @@ function agentStatus(agent: OfficeAgentView, unavailable: string) {
     : presenceLabel(agent.presence, agent.enabled);
 }
 
-export function OfficeDiorama({ agents, generatedAt }: { agents: OfficeAgentView[]; generatedAt: number }) {
+export function OfficeDiorama({ agents, generatedAt, speech = [], meeting = null, onToggleChat, chatOpen = false }: {
+  agents: OfficeAgentView[];
+  generatedAt: number;
+  /** Who has something over their head right now, most important first. */
+  speech?: SpeechCandidate[];
+  /** The room's own word for "we are meeting", when one is live. */
+  meeting?: { label: string; count: number } | null;
+  /** Given by the view that owns the chat panel; without it no toggle is drawn. */
+  onToggleChat?: () => void;
+  chatOpen?: boolean;
+}) {
   const { t, lang } = useI18n();
   const [agentId, setAgentId] = useState<string>();
   const dialog = useRef<HTMLDialogElement>(null);
@@ -77,12 +94,107 @@ export function OfficeDiorama({ agents, generatedAt }: { agents: OfficeAgentView
     .filter(([, count]) => count > 0);
   const summary = counts.map(([tone, count]) => `${t(TONE_LABEL[tone])} ${count}`).join(' · ');
 
+  // The stage is the artwork's 3:2 at whatever width it was given, so one
+  // measurement gives both edges. Until the browser has measured it (and on a
+  // server render) the layout runs against a desk-sized guess: the picture is
+  // static, so the first frame is the only one that can be off.
+  const stage = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 768, height: 512 });
+  useEffect(() => {
+    const element = stage.current;
+    if (!element) return undefined;
+    const measure = () => {
+      const rect = element.getBoundingClientRect();
+      if (rect.width > 0) {
+        setSize(current => (Math.abs(current.width - rect.width) < 1
+          ? current
+          : { width: Math.round(rect.width), height: Math.round(rect.height) }));
+      }
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure);
+      return () => window.removeEventListener('resize', measure);
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  // A phone reads the same words in a smaller pill; the box sizes are what the
+  // layout arithmetics use, so they are chosen here rather than in CSS alone.
+  const compact = size.width < 640;
+  const bubbleSize = compact ? { width: 96, height: 22 } : { width: 150, height: 28 };
+  const tagSize = compact ? { width: 68, height: 48 } : { width: 80, height: 62 };
+
+  // The tags are DOM, so their real boxes are measured rather than guessed: a tag
+  // with a connection badge is a third taller than one without, and a bubble laid
+  // out against the guess would sit on somebody's name. Sizes (not positions)
+  // are what is kept, because a tag is moved by the settle pass below.
+  const tagRefs = useRef(new Map<string, HTMLButtonElement>());
+  const [tagSizes, setTagSizes] = useState<Record<string, { width: number; height: number }>>({});
+  useMeasureEffect(() => {
+    const next: Record<string, { width: number; height: number }> = {};
+    let changed = false;
+    for (const [id, node] of tagRefs.current) {
+      const width = node.offsetWidth;
+      const height = node.offsetHeight;
+      if (!width || !height) continue;
+      next[id] = { width, height };
+      const before = tagSizes[id];
+      if (!before || Math.abs(before.width - width) > 0.5 || Math.abs(before.height - height) > 0.5) changed = true;
+    }
+    if (changed || Object.keys(next).length !== Object.keys(tagSizes).length) setTagSizes(next);
+  });
+
+  // Every tag is placed at its seat, then any two that touch are settled apart:
+  // at 390 px the artwork is 356 px wide and four pixels of overlap is still two
+  // names printed on top of each other.
+  const baseTags = placed.map(({ agent: item, seat }) => {
+    const measured = tagSizes[item.id];
+    const width = measured?.width ?? tagSize.width;
+    const height = measured?.height ?? tagSize.height;
+    const x = (seat.x / 100) * size.width;
+    const y = (seat.y / 100) * size.height;
+    return { id: item.id, x, y, box: { left: x - width / 2, top: y - height / 2, width, height } };
+  });
+  const tagShift = settleTags(baseTags.map(row => ({ id: row.id, box: row.box })), size);
+  const tagBoxes: Record<string, StageBox> = {};
+  for (const row of baseTags) {
+    tagBoxes[row.id] = { ...row.box, top: row.box.top + (tagShift[row.id] ?? 0) };
+  }
+
+  const meetingBox: StageBox | null = meeting
+    ? { left: size.width * 0.17 - 62, top: size.height * 0.22 - 13, width: 124, height: 26 }
+    : null;
+  const anchors = speech
+    .map(row => {
+      const seat = seatOf.get(row.agentId);
+      return seat ? { id: row.agentId, x: (seat.x / 100) * size.width, y: (seat.y / 100) * size.height } : null;
+    })
+    .filter((row): row is { id: string; x: number; y: number } => row !== null);
+  const bubbles: BubblePlacement[] = layoutDioramaBubbles(anchors, {
+    width: size.width,
+    height: size.height,
+    bubble: bubbleSize,
+    tag: tagSize,
+    tagBoxes,
+    ...(meetingBox ? { obstacles: [meetingBox] } : {}),
+    // A desk has room for four lines at once; a phone shows the newest two and
+    // gives everyone else the 💬 chip on their tag instead of a second box.
+    max: compact ? 2 : 4,
+  });
+  const bubbleOf = new Map(bubbles.map(row => [row.id, row]));
+  const saidIds = new Set(speech.map(row => row.agentId));
+  const chipIds = new Set([...saidIds].filter(id => !bubbleOf.has(id)));
+  const nameOf = new Map(agents.map(row => [row.id, row.name]));
+
   if (agents.length === 0) return <p className="text-xs text-ink-soft">{t('diorama.empty')}</p>;
 
   return (
     <section>
       <div className="relative overflow-hidden rounded-2xl border border-border bg-[#efe4d2] shadow-card">
-        <div className="relative aspect-[3/2] w-full">
+        <div ref={stage} data-diorama-stage="true" className="relative aspect-[3/2] w-full">
           <picture className="absolute inset-0 block">
             <source srcSet="/office-diorama-bg.webp" type="image/webp" />
             <img
@@ -103,11 +215,17 @@ export function OfficeDiorama({ agents, generatedAt }: { agents: OfficeAgentView
             return (
               <button
                 key={item.id}
+                ref={node => { if (node) tagRefs.current.set(item.id, node); else tagRefs.current.delete(item.id); }}
                 type="button"
                 aria-label={t('diorama.detailsButton', { name: item.name, status })}
                 data-seat={seat.id}
-                className="group absolute -translate-x-1/2 -translate-y-1/2 rounded-2xl p-0.5 outline-none transition focus-visible:ring-2 focus-visible:ring-white"
-                style={{ left: `${seat.x}%`, top: `${seat.y}%` }}
+                data-tag-shift={tagShift[item.id] ?? 0}
+                className="group absolute rounded-2xl p-0.5 outline-none transition focus-visible:ring-2 focus-visible:ring-white"
+                style={{
+                  left: `${seat.x}%`,
+                  top: `${seat.y}%`,
+                  transform: `translate(-50%, -50%) translateY(${tagShift[item.id] ?? 0}px)`,
+                }}
                 onClick={event => {
                   opener.current = event.currentTarget;
                   setAgentId(item.id);
@@ -133,7 +251,7 @@ export function OfficeDiorama({ agents, generatedAt }: { agents: OfficeAgentView
                     ) : null}
                   </span>
 
-                  <span className="rounded-md bg-white/95 px-1 py-[1px] text-center shadow-sm ring-1 ring-black/5 sm:px-1.5 sm:py-0.5">
+                  <span className="relative rounded-md bg-white/95 px-1 py-[1px] text-center shadow-sm ring-1 ring-black/5 sm:px-1.5 sm:py-0.5">
                     <span className="block max-w-[62px] truncate text-[10px] font-semibold leading-tight text-ink sm:max-w-[120px] sm:text-[11px]">
                       {item.name}
                     </span>
@@ -146,6 +264,16 @@ export function OfficeDiorama({ agents, generatedAt }: { agents: OfficeAgentView
                         mode={item.presence.connectionMode}
                         className="mt-0.5 hidden !gap-0.5 !px-1 !py-0 !text-[9px] leading-tight sm:inline-flex"
                       />
+                    ) : null}
+                    {/* Said something too, but there was no room for a second
+                        bubble: the chip keeps the speaker from going unnoticed. */}
+                    {chipIds.has(item.id) ? (
+                      <span
+                        aria-label={t('diorama.chipAria', { name: item.name })}
+                        className="absolute -right-1.5 -top-1.5 grid h-3.5 w-3.5 place-items-center rounded-full bg-emerald-500 text-[8px] leading-none text-white ring-2 ring-white"
+                      >
+                        <span aria-hidden="true">💬</span>
+                      </span>
                     ) : null}
                   </span>
                 </span>
@@ -160,6 +288,84 @@ export function OfficeDiorama({ agents, generatedAt }: { agents: OfficeAgentView
             </span>
             <span className="whitespace-nowrap">{summary}</span>
           </p>
+
+          {/* The meeting itself: the glass room on the left is where the staff
+              sit down together, so that is where the room's state is drawn — a
+              dashed ring around the table and the words over it. */}
+          {meeting ? (
+            <>
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute rounded-[42%] border-2 border-dashed border-emerald-300/80 shadow-[0_0_24px_rgba(16,185,129,0.25)]"
+                style={{ left: '5%', top: '31%', width: '26%', height: '22%' }}
+              />
+              <span
+                role="note"
+                data-meeting-badge="true"
+                className="pointer-events-none absolute z-10 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 whitespace-nowrap rounded-full bg-emerald-600/95 px-2 py-[3px] text-[9px] font-semibold leading-none text-white shadow-md sm:text-[10px]"
+                style={{ left: '17%', top: '22%' }}
+              >
+                <span aria-hidden="true" className="relative flex h-1.5 w-1.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-white/80" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-white" />
+                </span>
+                <span aria-hidden="true">💬</span>
+                {meeting.label}
+              </span>
+            </>
+          ) : null}
+
+          {/* What each of them last said, laid out against the tags so two lines
+              never become one. A speaker with no room gets the chip instead (see
+              the tag above); a placed bubble keeps a tail on its own tag. */}
+          {bubbles.map(placement => {
+            const said = speech.find(row => row.agentId === placement.id);
+            if (!said) return null;
+            const name = nameOf.get(placement.id) ?? '';
+            const tone = said.kind === 'said'
+              ? 'bg-white/95 text-ink ring-black/5'
+              : said.kind === 'answering'
+                ? 'bg-sky-50 text-sky-900 ring-sky-200'
+                : 'bg-amber-50 text-amber-900 ring-amber-200';
+            const dot = said.kind === 'said' ? '#0ea5e9' : said.kind === 'answering' ? '#0ea5e9' : '#f59e0b';
+            return (
+              <span
+                key={placement.id}
+                role="note"
+                data-bubble={placement.id}
+                aria-label={t('diorama.saidAria', { name, text: said.text })}
+                className="pointer-events-none absolute z-10"
+                style={{ left: placement.left, top: placement.top, width: placement.width, height: placement.height }}
+              >
+                <span className={`flex h-full items-center gap-1 rounded-full px-2 shadow-md ring-1 ${tone}`}>
+                  <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: dot }} />
+                  <span className="min-w-0 truncate text-[9px] font-semibold leading-none sm:text-[10px]">{said.text}</span>
+                </span>
+                <span
+                  aria-hidden="true"
+                  className="absolute h-2 w-2 rotate-45 rounded-[1px] bg-white/95 shadow-sm"
+                  style={{
+                    left: placement.tailX - placement.left - 4,
+                    ...(placement.side === 'above' ? { bottom: -3 } : { top: -3 }),
+                  }}
+                />
+              </span>
+            );
+          })}
+
+          {onToggleChat ? (
+            <button
+              type="button"
+              onClick={onToggleChat}
+              aria-pressed={chatOpen}
+              title={chatOpen ? t('diorama.chatClose') : t('diorama.chatOpen')}
+              className={`absolute right-2 top-2 z-20 rounded-full px-2.5 py-1 text-[9px] font-semibold leading-none shadow-sm ring-1 transition sm:right-3 sm:top-3 sm:text-[10px] ${
+                chatOpen ? 'bg-white/95 text-ink ring-border' : 'bg-ink text-white ring-black/10'
+              }`}
+            >
+              {chatOpen ? t('diorama.chatClose') : `💬 ${t('chat.title')}`}
+            </button>
+          ) : null}
 
           <p className="pointer-events-none absolute bottom-2 left-2 rounded-full bg-white/70 px-2 py-1 text-[9px] font-medium leading-none text-ink-muted backdrop-blur-sm sm:bottom-3 sm:left-3 sm:text-[10px]">
             {t('diorama.hint')}
