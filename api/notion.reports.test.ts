@@ -142,3 +142,85 @@ describe('the report cron', () => {
     expect(after.daily.url).toBe(before.daily.url);
   });
 });
+
+// ─── The history the workshop shows ──────────────────────────────────────
+
+// The workshop card explains a missing report by what the last attempts did:
+// which period each one covered, when it ran, and why it failed. That history
+// is written next to the status the card already read, so opening the panel
+// costs no extra call.
+describe('the run history', () => {
+  it('records the period, the time and the report a run produced', async () => {
+    const now = Date.parse('2026-11-28T00:00:00Z');
+    await runReportCron(store, now);
+    const status = await readReportStatus(store);
+
+    expect(status.daily.runs?.[0]).toMatchObject({
+      key: 'daily:2026-11-27', start: '2026-11-27', end: '2026-11-27', at: now, result: 'saved',
+    });
+    // The fake Notion answers with an id that is not a Notion page id, so the
+    // run has nothing to link to — but it never carries the id itself.
+    expect(status.daily.runs?.[0]?.url).toBeNull();
+    expect(status.daily.runs?.[0]).not.toHaveProperty('pageId');
+    expect(status.weekly.runs?.[0]).toMatchObject({ key: 'weekly:2026-11-16', start: '2026-11-16', end: '2026-11-22' });
+
+    // A page id Notion really returns turns into the link the card offers.
+    const pageId = '1f2e3d4c5b6a79880a1b2c3d4e5f6071';
+    await store.command(['SET', 'notion:v1:reports:status', JSON.stringify({ daily: {
+      attempt: 'saved', attemptedAt: now,
+      runs: [{ key: 'daily:2026-11-27', start: '2026-11-27', end: '2026-11-27', at: now, result: 'saved', pageId }],
+    } })]);
+    const seeded = await readReportStatus(store);
+    expect(seeded.daily.runs?.[0]?.url).toBe('https://www.notion.so/' + pageId);
+    expect(seeded.daily.runs?.[0]).not.toHaveProperty('pageId');
+  });
+
+  it('says why a run failed and keeps the report that did get saved', async () => {
+    const first = Date.parse('2026-11-28T00:00:00Z');
+    await runReportCron(store, first);
+    const before = await readReportStatus(store);
+
+    await saveMonthlyLimit(store, 1);
+    await store.command(['SET', 'notion:v1:rows:2026-11', '1']);
+    await runReportCron(store, first + 86_400_000);
+    const after = await readReportStatus(store);
+
+    expect(after.daily.runs?.[0]).toMatchObject({ key: 'daily:2026-11-28', result: 'failed', reason: 'budget' });
+    // Yesterday's report is still the link the card offers, and it is in the list.
+    expect(after.daily.url).toBe(before.daily.url);
+    expect(after.daily.runs?.[1]).toMatchObject({ result: 'saved', url: before.daily.url });
+  });
+
+  it('blames the setup, not Notion, when the report databases were never built', async () => {
+    await store.command(['DEL', 'notion:v1:schema']);
+    const result = await runReportCron(store, Date.parse('2026-11-28T00:00:00Z'));
+    expect(result).toEqual({ results: { daily: 'failed', weekly: 'failed' } });
+
+    const status = await readReportStatus(store);
+    expect(status.daily.runs?.[0]).toMatchObject({ result: 'failed', reason: 'setup' });
+    // The attempt is recorded, but no Notion call was spent on it.
+    expect(notion.calls.filter(call => call.method === 'POST' && call.path === '/v1/pages')).toHaveLength(0);
+  });
+
+  it('keeps seven runs per kind, newest first', async () => {
+    const old = Array.from({ length: 9 }, (_, index) => ({
+      key: 'daily:2026-11-' + String(index + 10).padStart(2, '0'),
+      start: '2026-11-' + String(index + 10).padStart(2, '0'),
+      end: '2026-11-' + String(index + 10).padStart(2, '0'),
+      at: Date.parse('2026-11-10T00:00:00Z') + index * 86_400_000,
+      result: 'saved' as const,
+      pageId: '0'.repeat(31) + String(index),
+    }));
+    await store.command(['SET', 'notion:v1:reports:status', JSON.stringify({ daily: { attempt: 'saved', attemptedAt: old[8]!.at, runs: [...old].reverse() } })]);
+
+    const now = Date.parse('2026-11-28T00:00:00Z');
+    await runReportCron(store, now);
+    const status = await readReportStatus(store);
+
+    expect(status.daily.runs).toHaveLength(7);
+    expect(status.daily.runs?.[0]?.at).toBe(now);
+    // The oldest attempts fall off the end rather than growing the status forever.
+    expect(status.daily.runs?.some(run => run.key === 'daily:2026-11-10')).toBe(false);
+    expect(status.daily.runs?.at(-1)?.key).toBe('daily:2026-11-13');
+  });
+});

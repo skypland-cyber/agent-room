@@ -551,3 +551,67 @@ describe('today summary and room expiry', () => {
     expect(full.jsonBody.overview.todaySummary).toBeDefined();
   });
 });
+
+describe('the review queue evidence', () => {
+  // The work tab's review card answers "what am I being asked to look at"
+  // before the reviewer leaves the dashboard: when it was submitted, how many
+  // times, which deliverables are attached, and the last verdict's note — with
+  // any credential in that note redacted on the way out.
+  const seed = async (code: string, tasks: unknown[]) => {
+    const at = Date.now();
+    const { createRoom, registerOfficeRoom } = await import('@agent-room/upstash-client');
+    const { createRemoteRoomClient } = await import('./_mcpRoomClient.js');
+    const client = createRemoteRoomClient(undefined);
+    await createRoom(client.store, { code, createdBy: 'Owner', topic: '상패 시안', requireUnusedCode: true });
+    await client.store.command(['SET', `task-board:${code}`, JSON.stringify({ code, version: 1, tasks })]);
+    await registerOfficeRoom(client.store, code, { at });
+    return at;
+  };
+
+  it('reads the submission count, the deliverables and a redacted verdict note', async () => {
+    const cookie = await signIn();
+    const at = Date.now();
+    const attempt = (id: string, status: string, startedAt: number) => ({
+      id, leaseId: 'lease_' + id, memberId: 'mem_1', name: 'Codex', client: 'cc', status, startedAt, confirmedAt: startedAt,
+    });
+    await seed('RVW-111-222', [
+      {
+        id: 'T-05', title: '상패 시안 3종', state: 'awaiting_review', owner: 'Codex', verifier: '망고',
+        createdAt: at - 10 * 3_600_000, updatedAt: at,
+        reviewRequestedAt: at - 3_600_000,
+        evidence: { fileListing: 'ls', fileExcerpt: 'head', submittedBy: 'Codex', submittedClient: 'cc', at: at - 3_600_000 },
+        // Two claims, one of which was interrupted: one submission, not two.
+        attempts: [attempt('att_1', 'interrupted', at - 9 * 3_600_000), attempt('att_2', 'submitted', at - 3_600_000)],
+        // The same file twice is still one deliverable.
+        files: { deliverables: ['vf_a', 'vf_b', 'vf_a'] },
+        verdict: { verdict: 'rejected', note: '로그에 token=abcd1234 가 남아 있습니다', by: '망고', byClient: 'cc', at: at - 20 * 3_600_000 },
+      },
+      {
+        id: 'T-06', title: '기존 카드', state: 'awaiting_review', owner: 'Qwen',
+        createdAt: at, updatedAt: at - 60_000,
+        evidence: { fileListing: 'ls', fileExcerpt: 'head', submittedBy: 'Qwen', submittedClient: 'cc', at: at - 60_000 },
+      },
+      { id: 'T-07', title: '진행 중', state: 'in_progress', owner: 'Gemini', createdAt: at, updatedAt: at },
+    ]);
+
+    const res = await call('overview', {}, cookie);
+    expect(res.statusCode).toBe(200);
+    const byId = Object.fromEntries(
+      (res.jsonBody.overview.openTasks as Array<{ id: string } & Record<string, unknown>>).map(row => [row.id, row]),
+    );
+
+    expect(byId['T-05']!.review).toEqual({
+      requestedAt: at - 3_600_000,
+      attempt: 1,
+      deliverableCount: 2,
+      previousVerdict: '로그에 token=[REDACTED] 가 남아 있습니다',
+    });
+    // A card from a board with no lease history still says when and how much,
+    // and does not invent a submission count.
+    expect(byId['T-06']!.review).toEqual({ requestedAt: at - 60_000, deliverableCount: 0 });
+    // Work that is not waiting for a verdict carries no review block at all.
+    expect(byId['T-07']).not.toHaveProperty('review');
+    // The credential never reaches the dashboard, in any field.
+    expect(JSON.stringify(res.jsonBody)).not.toContain('abcd1234');
+  });
+});

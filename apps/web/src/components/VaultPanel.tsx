@@ -43,6 +43,8 @@ interface Props {
   ended: boolean;
   /** Show one task's files only (opened from the board). */
   taskFilter?: string;
+  /** The shelf a deep link opens on: a review link is about what was submitted. */
+  initialKind?: VaultKind;
   onClearTaskFilter?: () => void;
   /** Drops a line into the room composer so a person can ask an agent about a file. */
   onMention?: (text: string) => void;
@@ -73,9 +75,9 @@ function relativeTime(at: number): string {
   return translate('time.daysAgo', { count: Math.round(hours / 24) });
 }
 
-export function VaultPanel({ code, me, isHost, ended, taskFilter, onClearTaskFilter, onMention }: Props) {
+export function VaultPanel({ code, me, isHost, ended, taskFilter, initialKind, onClearTaskFilter, onMention }: Props) {
   const { t } = useI18n();
-  const [kind, setKind] = useState<VaultKind>('material');
+  const [kind, setKind] = useState<VaultKind>(initialKind ?? 'material');
   const [files, setFiles] = useState<VaultRow[]>([]);
   const [folders, setFolders] = useState<VaultFolder[]>([]);
   const [usage, setUsage] = useState<VaultUsage>(EMPTY_USAGE);

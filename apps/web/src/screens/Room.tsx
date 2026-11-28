@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useCallback, type ClipboardEvent, type DragEvent } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useRoom } from '../hooks/useRoom.js';
 import { useTaskBoard } from '../hooks/useTaskBoard.js';
 import { Bubble } from '../components/Bubble.js';
@@ -39,6 +39,10 @@ const TEXTAREA_MIN_HEIGHT = 42;
 export function Room() {
   const { code = '' } = useParams();
   const navigate = useNavigate();
+  const [search] = useSearchParams();
+  const requestedFiles = search.get('taskFiles');
+  const taskFiles = requestedFiles && /^T-\d+$/i.test(requestedFiles) ? requestedFiles.toUpperCase() : undefined;
+  const joinDestination = `/j/${code}${taskFiles ? '?taskFiles=' + encodeURIComponent(taskFiles) : ''}`;
   // Identity is whatever Join wrote into sessionStorage. If it's missing
   // (visiting /r/CODE without going through Join — e.g. an invite link
   // someone forwarded after pruning the path), we redirect to /j/CODE
@@ -47,11 +51,11 @@ export function Room() {
   const [self, _setSelf] = useState<SelfIdentity | null>(() => readStoredSelf(code));
   useEffect(() => {
     if (!self || (!roomProof(code).seatKey && !roomProof(code).hostKey)) {
-      navigate(`/j/${code}`, { replace: true });
+      navigate(joinDestination, { replace: true });
     } else if (!roomProof(code).seatKey) {
       navigate(`/r/${code}/lobby`, { replace: true });
     }
-  }, [self, code, navigate]);
+  }, [self, code, navigate, joinDestination]);
   const { room, messages, error, sendMessage, refreshRoom, forceRefresh } = useRoom(code, self?.name ?? '');
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
@@ -176,9 +180,9 @@ export function Room() {
         const { showToast } = await import('../components/Toast.js');
         showToast('You were removed from the meeting by the host');
       })();
-      navigate(`/j/${code}`, { replace: true });
+      navigate(joinDestination, { replace: true });
     }
-  }, [room, self, ended, code, navigate]);
+  }, [room, self, ended, code, navigate, joinDestination]);
 
   // Track last message time for idle detection
   useEffect(() => {
@@ -294,11 +298,11 @@ export function Room() {
     }
   }
 
-  const [mobilePanel, setMobilePanel] = useState<'chat' | 'tasks' | 'files' | 'people'>('chat');
+  const [mobilePanel, setMobilePanel] = useState<'chat' | 'tasks' | 'files' | 'people'>(taskFiles ? 'files' : 'chat');
   // Desktop right column: the board and the file shelf share one side panel.
   // Two panels side by side would squeeze the chat to a column of two words.
-  const [rightPanel, setRightPanel] = useState<'tasks' | 'files'>('tasks');
-  const [vaultTaskFilter, setVaultTaskFilter] = useState<string | undefined>(undefined);
+  const [rightPanel, setRightPanel] = useState<'tasks' | 'files'>(taskFiles ? 'files' : 'tasks');
+  const [vaultTaskFilter, setVaultTaskFilter] = useState<string | undefined>(taskFiles);
   const [reportBusy, setReportBusy] = useState(false);
   const artifacts = extractArtifacts(messages);
   // Board lives here, not inside TaskBoard, so the tab strip can badge how
@@ -1297,6 +1301,7 @@ export function Room() {
                 isHost={isHost}
                 ended={ended}
                 {...(vaultTaskFilter ? { taskFilter: vaultTaskFilter, onClearTaskFilter: () => setVaultTaskFilter(undefined) } : {})}
+                {...(taskFiles ? { initialKind: 'deliverable' as const } : {})}
                 onMention={appendText}
               />
             ) : (

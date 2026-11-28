@@ -1,6 +1,6 @@
 import type { UpstashClient } from '@agent-room/upstash-client';
 import { getTaskBoard, listBoardRooms } from '@agent-room/upstash-client';
-import { createNotionClient, normalizeNotionId, notionConfig } from './client.js';
+import { NotionError, createNotionClient, normalizeNotionId, notionConfig } from './client.js';
 import { loadNotionSchema } from './schema.js';
 import { datePayload, drainOutboxNow, richTextPayload, writeRow } from './sync.js';
 
@@ -12,7 +12,35 @@ const KINDS = ['daily', 'weekly'] as const;
 type ReportKind = typeof KINDS[number];
 type Period = { key: string; start: number; end: number };
 type Save = { key: string; savedAt: number; pageId: string };
-type Result = { attempt: 'saved' | 'failed'; attemptedAt?: number; lastSuccess?: Save };
+type Failure = 'setup' | 'budget' | 'source' | 'write';
+type ReportRun = {
+  key: string;
+  start: string;
+  end: string;
+  at: number;
+  result: 'saved' | 'failed';
+  reason?: Failure;
+  pageId?: string;
+};
+type Result = {
+  attempt: 'saved' | 'failed';
+  attemptedAt?: number;
+  lastSuccess?: Save;
+  runs?: ReportRun[];
+};
+
+function reportUrl(pageId?: string): string | null {
+  const id = normalizeNotionId(pageId);
+  return id ? 'https://www.notion.so/' + id.replaceAll('-', '') : null;
+}
+
+function failureReason(error: unknown): Failure {
+  if (error instanceof NotionError) {
+    if (error.code === 'row_budget_exceeded' || error.code === 'notion_block_limit') return 'budget';
+    if (error.code === 'notion_not_bootstrapped' || error.code === 'notion_not_configured' || error.code === 'notion_forbidden' || error.code === 'notion_schema_drift') return 'setup';
+  }
+  return 'write';
+}
 type ReportStatus = Partial<Record<ReportKind, Result>>;
 
 function kstDate(at: number): string {
@@ -39,12 +67,12 @@ export async function readReportStatus(store: UpstashClient) {
   return Object.fromEntries(KINDS.map(kind => {
     const row = status[kind];
     const saved = row?.lastSuccess;
-    const id = normalizeNotionId(saved?.pageId);
     return [kind, {
       attempt: row?.attempt ?? 'none',
       savedAt: saved?.savedAt ?? null,
       attemptedAt: row?.attemptedAt ?? null,
-      url: id ? 'https://www.notion.so/' + id.replaceAll('-', '') : null,
+      url: reportUrl(saved?.pageId),
+      runs: (row?.runs ?? []).map(({ pageId, ...run }) => ({ ...run, url: reportUrl(pageId) })),
     }];
   }));
 }
@@ -94,33 +122,42 @@ export async function runReportCron(store: UpstashClient, now = Date.now()) {
     const counts = countActivity(activity, period);
     const coverage = '보관 중인 업무 보드의 최신 제출·판정 기록 기준입니다. 기간 종료 시점 상태와 만료된 보드는 포함하지 않습니다.';
     const englishLabel = kind === 'daily' ? 'Daily' : 'Weekly';
-    const english = activity.unreadable
-      ? 'Activity for this period couldn’t be loaded.'
-      : ['Tasks marked done: ' + counts.done + ' · Tasks submitted for review: ' + counts.submitted, activity.partial ? 'Some activity couldn’t be loaded. The totals include only the activity available.' : ''].filter(Boolean).join('\n');
-    const summary = activity.unreadable
-      ? '이 기간의 활동을 불러오지 못했습니다.'
-      : [label + ' 업무 현황 · ' + name, '완료 처리된 업무 ' + counts.done + '건 · 검토를 요청한 업무 ' + counts.submitted + '건', activity.partial ? '일부 활동을 불러오지 못했습니다. 표시된 수치에는 확인된 활동만 포함됩니다.' : '', coverage].filter(Boolean).join('\n');
+    const english = ['Tasks marked done: ' + counts.done + ' · Tasks submitted for review: ' + counts.submitted, activity.partial ? 'Some activity couldn’t be loaded. The totals include only the activity available.' : ''].filter(Boolean).join('\n');
+    const summary = [label + ' 업무 현황 · ' + name, '완료 처리된 업무 ' + counts.done + '건 · 검토를 요청한 업무 ' + counts.submitted + '건', activity.partial ? '일부 활동을 불러오지 못했습니다. 표시된 수치에는 확인된 활동만 포함됩니다.' : '', coverage].filter(Boolean).join('\n');
+    const previous = status[kind];
+    const run = { key: period.key, start, end, at: now };
+    let entry: ReportRun;
+    let lastSuccess = previous?.lastSuccess;
     try {
-      if (!schema) throw new Error('Notion report schema unavailable');
-      const row = await writeRow({
-        store, client, schema, dbKey: 'reports', sourceId: period.key,
-        title: 'AI 사무실 ' + label + ' 보고서 · ' + name, now,
-        properties: {
-          '종류': { select: { name: label } },
-          '기간 시작': { date: { start } },
-          '기간 종료': { date: { start: end } },
-          '요약': richTextPayload(summary + '\n\nAI Office ' + englishLabel + ' Report · ' + name + '\n' + english),
-          '발행': datePayload(now),
-          ...(activity.unreadable ? {} : { '완료': { number: counts.done } }),
-        },
-        hashIgnore: ['발행'],
-      });
-      if (!row.pageId) throw new Error('Notion report row missing');
-      status[kind] = { attempt: 'saved', attemptedAt: now, lastSuccess: { key: period.key, savedAt: now, pageId: row.pageId } };
-    } catch {
-      status[kind] = { ...status[kind], attempt: 'failed', attemptedAt: now };
+      if (!schema) throw new NotionError('Notion report schema unavailable', 'notion_not_bootstrapped', 503);
+      if (activity.unreadable) {
+        entry = { ...run, result: 'failed', reason: 'source' };
+      } else {
+        const row = await writeRow({
+          store, client, schema, dbKey: 'reports', sourceId: period.key,
+          title: 'AI 사무실 ' + label + ' 보고서 · ' + name, now,
+          properties: {
+            '종류': { select: { name: label } },
+            '기간 시작': { date: { start } },
+            '기간 종료': { date: { start: end } },
+            '요약': richTextPayload(summary + '\n\nAI Office ' + englishLabel + ' Report · ' + name + '\n' + english),
+            '발행': datePayload(now),
+            '완료': { number: counts.done },
+          },
+          hashIgnore: ['발행'],
+        });
+        if (!row.pageId) throw new Error('Notion report row missing');
+        entry = { ...run, result: 'saved', pageId: row.pageId };
+        lastSuccess = { key: period.key, savedAt: now, pageId: row.pageId };
+      }
+    } catch (error) {
+      entry = { ...run, result: 'failed', reason: failureReason(error) };
     }
-    results[kind] = status[kind]!.attempt;
+    status[kind] = {
+      attempt: entry.result, attemptedAt: now, ...(lastSuccess ? { lastSuccess } : {}),
+      runs: [entry, ...(previous?.runs ?? []).filter(old => old.key !== entry.key || old.at !== entry.at)].slice(0, 7),
+    };
+    results[kind] = entry.result;
     await store.command(['SET', STATUS_KEY, JSON.stringify(status)]);
   }
   await drainOutboxNow(store, { limit: 2, config, now });

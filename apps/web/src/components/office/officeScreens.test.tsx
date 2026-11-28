@@ -227,6 +227,31 @@ describe('office screens render', () => {
     expect(html).toContain('QWE-RTY-234');
   });
 
+  it('queues the reviews with their evidence, and opens the shelf already filtered', () => {
+    const reviewing = {
+      ...overview,
+      openTasks: [
+        taskRef('T-05', 'awaiting_review', {
+          verifier: '망고',
+          review: { requestedAt: now - 3_600_000, attempt: 2, deliverableCount: 2, previousVerdict: '수치 표기 확인' },
+        }),
+        // A card whose board predates the review block must still render.
+        taskRef('T-06', 'awaiting_review'),
+      ],
+    } as unknown as typeof overview;
+    const html = renderToStaticMarkup(<OfficeWorkPanel overview={reviewing} onChanged={() => undefined} />);
+
+    expect(html).toContain('검수 대기 · 2건');
+    expect(html).toContain('망고');
+    expect(html).toContain('제출 시도 2');
+    expect(html).toContain('연결 산출물 2개');
+    expect(html).toContain('이전 판정 · 수치 표기 확인');
+    // One link to the room, with the file shelf already narrowed to this task.
+    expect(html).toContain('href="/r/QWE-RTY-234?taskFiles=T-05"');
+    // Nothing was submitted for the second card, so it says so instead of zeroes.
+    expect(html).toContain('미배정');
+  });
+
   it('shows what today did, and where the room clock stands', () => {
     const today = renderToStaticMarkup(<OfficeTodayCard overview={overview} onOpenWork={() => undefined} />);
     expect(today).toContain('오늘 (11월 27일)');
