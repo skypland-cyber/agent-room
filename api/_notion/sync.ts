@@ -63,6 +63,13 @@ import {
   splitByOwnership,
 } from './mapping.js';
 import { drainOutbox, enqueueOutbox, outboxDepth, type DrainResult } from './outbox.js';
+import {
+  budgetAllowsCreate,
+  markBudgetStop,
+  readBudget,
+  recordRowCreated,
+  rowBudgetExceededError,
+} from './budget.js';
 
 /** Every write the office makes says it came from the system. */
 export const NOTION_ACTOR: OfficeActor = { name: 'notion', kind: 'system' };
@@ -74,6 +81,9 @@ export const RICH_TEXT_MAX = RICH_TEXT_CHUNK * RICH_TEXT_CHUNKS;
 /** Knowledge bodies are property-sized, not file-sized (§4.2.8). */
 export const KNOWLEDGE_BODY_MAX = 6_000;
 export const KNOWLEDGE_KEYWORDS_MAX = 1_000;
+/** A meeting promotes at most this many [DECISION]/[RESULT] lines into one row. */
+export const PROMOTION_MAX_LINES = 5;
+export const PROMOTION_LINE_CHARS = 400;
 /** Give up on an inline write after this long and queue it instead. */
 export const INLINE_BUDGET_MS = 1_500;
 /** Calls one event may spend: a key lookup, a create, and a little slack. */
@@ -119,6 +129,8 @@ export interface SyncRunResult {
   queued?: boolean;
   /** True when the row was found by key property instead of the Redis link. */
   recovered?: boolean;
+  /** What the meeting's [DECISION]/[RESULT] promotion did, when it ran. */
+  promoted?: 'created' | 'updated' | 'unchanged' | 'skipped';
 }
 
 export interface SyncDispatch {
@@ -260,6 +272,34 @@ export function tagLines(
     }
   }
   return out.join('\n');
+}
+
+/**
+ * The meeting's settled lines, in the order they were settled.
+ *
+ * A meeting that decided something should not have to decide it twice. This
+ * walks the transcript and keeps the `[DECISION]` and `[RESULT]` lines — up to
+ * `max` in total, which is what one promoted knowledge row holds (§부록 C).
+ * `[TODO]` is deliberately not promoted: it is already the meeting row's 할 일,
+ * and a task is not knowledge until it is done.
+ */
+export function promotionLines(
+  messages: ReadonlyArray<{ name: string; text: string }> | undefined,
+  max = PROMOTION_MAX_LINES,
+): string[] {
+  const marker = /\[(DECISION|RESULT)\]/i;
+  const out: string[] = [];
+  for (const message of messages ?? []) {
+    if (!marker.test(message.text)) continue;
+    for (const line of message.text.split(/\r?\n/)) {
+      if (!marker.test(line)) continue;
+      const body = line.replace(/^.*?\[(DECISION|RESULT)\]/i, '').replace(/^[\s:：\-·]+/, '').trim();
+      if (!body) continue;
+      out.push(`· ${clipText(body, PROMOTION_LINE_CHARS)}${message.name ? ` (${message.name})` : ''}`);
+      if (out.length >= max) return out;
+    }
+  }
+  return out;
 }
 
 /** `2/5 완료 · 검토 1 · 보류 1` — the board at archive time, as one line. */
@@ -417,6 +457,14 @@ export async function writeRow(options: WriteRowOptions): Promise<WriteRowResult
     recovered = Boolean(pageId);
   }
   if (!pageId && options.create === false) return { ok: true, action: 'skipped' };
+  const isCreate = !pageId;
+  // The month's row budget is checked before the create and charged after it:
+  // a failed write costs nothing, and a month at the ceiling stops new rows
+  // while every update and read keeps working (§5.5).
+  if (isCreate) {
+    const { allowed, budget } = await budgetAllowsCreate(store, options.now ?? Date.now());
+    if (!allowed) throw rowBudgetExceededError(budget);
+  }
 
   const owners = ownerMapOf(dbKey);
   const { writable, createOnly } = splitByOwnership(conformed, owners);
@@ -436,6 +484,14 @@ export async function writeRow(options: WriteRowOptions): Promise<WriteRowResult
       ...relationPayload,
     });
   const written = requirePageId(page, `${dbKey} row`);
+  if (isCreate) {
+    const charged = await recordRowCreated(store, options.now ?? Date.now()).catch(() => null);
+    if (charged?.warned) {
+      await logAudit(store, 'notion.budget.warn', {
+        detail: `${charged.budget.used}/${charged.budget.limit} rows this month (${charged.budget.month} KST) — near the free plan's block supply`,
+      });
+    }
+  }
   await saveLink(store, dbKey, sourceId, { pageId: written, hash, at: options.now ?? Date.now() });
   if (dbKey === 'meetings' && typeof properties['회의 코드'] === 'string') {
     await saveRoomLink(store, properties['회의 코드'] as string, written);
@@ -506,6 +562,63 @@ async function writeMeeting(ctx: SyncContext, archive: OfficeArchive): Promise<W
     now: ctx.now,
   });
   return result;
+}
+
+/**
+ * A finished meeting's decisions, as one knowledge row (§8.4, §13 Phase 4).
+ *
+ * One row per meeting, not one per line: the block that a row costs is the thing
+ * being rationed, and five decisions from one conversation belong together
+ * anyway. The key is the room code, so a re-archived meeting updates its own row
+ * instead of writing a second one.
+ *
+ * Only `full` promotes (`meta` is the meetings-only step by design), and only
+ * when `NOTION_AUTO_PROMOTE` is on. The row goes through the same `writeRow` as
+ * everything else, so the month's budget guard covers it too.
+ */
+async function promoteMeetingKnowledge(
+  ctx: SyncContext,
+  archive: OfficeArchive,
+): Promise<WriteRowResult | null> {
+  if (ctx.config.syncMode !== 'full' || !ctx.config.autoPromote) return null;
+  const lines = promotionLines(archive.messages);
+  if (lines.length === 0 || !archive.roomCode) return null;
+  const title = `${clipText(archive.topic || `회의 ${archive.roomCode}`, 180)} — 결정·결과`;
+  const body = lines.join('\n');
+  let projectName: string | undefined;
+  let projectPages: string[] = [];
+  if (archive.projectId) {
+    // A Redis read, not a Notion one: the project name is a denormalised copy
+    // for filtering, and the relation already points at the row.
+    const projects = await listProjects(ctx.store).catch(() => [] as OfficeProject[]);
+    projectName = projects.find(project => project.id === archive.projectId)?.name;
+    projectPages = await relationPages(ctx.store, 'projects', [archive.projectId]);
+  }
+  const properties = compact({
+    '유형': selectPayload('knowledge', '유형', '결정'),
+    ...(projectName ? { '프로젝트명': richTextPayload(projectName, 200) } : {}),
+    '내용': richTextPayload(body, KNOWLEDGE_BODY_MAX),
+    '키워드': richTextPayload(keywordCorpus(title, body), KNOWLEDGE_KEYWORDS_MAX),
+    '출처': selectPayload('knowledge', '출처', '회의'),
+    '출처 참조': richTextPayload(archive.roomCode, 200),
+    '중요도': selectPayload('knowledge', '중요도', '상'),
+    // The meeting's own archive time, not `now`: a second run of the same event
+    // must hash the same and cost no call, and a re-archive that changed the
+    // minutes is a real update.
+    '최초 작성': datePayload(archive.archivedAt ?? archive.roomCreatedAt),
+    '최근 갱신': datePayload(archive.archivedAt ?? archive.roomCreatedAt),
+  });
+  return writeRow({
+    store: ctx.store,
+    client: ctx.client,
+    schema: ctx.schema,
+    dbKey: 'knowledge',
+    sourceId: `${archive.roomCode}:decision`,
+    title,
+    properties,
+    ...(projectPages.length ? { relations: { '프로젝트': projectPages } } : {}),
+    now: ctx.now,
+  });
 }
 
 async function writeDeliverable(ctx: SyncContext, file: VaultFile): Promise<WriteRowResult> {
@@ -751,10 +864,20 @@ export async function runEvent(
   }
   const ctx: SyncContext = { store, client, schema, config, now };
   let result: WriteRowResult;
+  let promoted: SyncRunResult['promoted'];
   switch (event.kind) {
-    case 'meeting.archived':
+    case 'meeting.archived': {
       result = await writeMeeting(ctx, event.archive);
+      if (result.action !== 'skipped') {
+        // The promotion runs after the meeting row, not instead of it: a
+        // knowledge row that could not be written must not cost the meeting its
+        // own row. A budget refusal throws here on purpose, so the whole event
+        // waits in the outbox and promotes when the month turns.
+        const promotion = await promoteMeetingKnowledge(ctx, event.archive);
+        if (promotion) promoted = promotion.action;
+      }
       break;
+    }
     case 'deliverable.upsert':
       result = event.file.kind === 'deliverable'
         ? await writeDeliverable(ctx, event.file)
@@ -793,6 +916,7 @@ export async function runEvent(
     action: result.action,
     ...(result.pageId ? { pageId: result.pageId } : {}),
     ...(result.recovered ? { recovered: true } : {}),
+    ...(promoted ? { promoted } : {}),
     calls: client.stats.calls - before,
   };
 }
@@ -826,9 +950,22 @@ export async function runEventWithRetry(
       return await runEvent(store, event, { client, config, now });
     } catch (error) {
       lastError = error;
+      // A full month will not turn in the time a retry takes, so retrying only
+      // spends calls. The event goes straight to the outbox instead.
+      if (error instanceof NotionError && error.code === 'row_budget_exceeded') break;
     }
   }
   const message = lastError instanceof Error ? lastError.message : 'sync failed';
+  if (lastError instanceof NotionError && lastError.code === 'row_budget_exceeded') {
+    const queued = await enqueueOutbox(store, event, lastError, now);
+    if (await markBudgetStop(store, now).catch(() => false)) {
+      const budget = await readBudget(store, now).catch(() => null);
+      await logAudit(store, 'notion.budget.stop', {
+        detail: `${event.kind}: ${budget ? `${budget.used}/${budget.limit} rows (${budget.month} KST)` : 'budget'} used; writing stopped, event kept as ${queued.id}`,
+      });
+    }
+    return { ok: false, kind: event.kind, reason: 'row_budget_exceeded', calls: client.stats.calls, queued: true };
+  }
   if (permanentFailure(lastError)) {
     await logAudit(store, 'notion.sync.failed', {
       detail: `${event.kind}: ${redactSecretText(message)}`, at: now,
@@ -843,7 +980,13 @@ export async function runEventWithRetry(
   return { ok: false, kind: event.kind, reason: message, calls: client.stats.calls, queued: true };
 }
 
-async function logAudit(
+/**
+ * Write one office audit line about a sync.
+ *
+ * Exported because the MCP knowledge tools narrate their own budget refusals,
+ * and a second copy of this would drift from the first.
+ */
+export async function logAudit(
   store: UpstashClient,
   action: string,
   fields: { target?: string; roomCode?: string; detail?: string; at?: number } = {},
@@ -978,13 +1121,45 @@ export function syncEvent(
   };
 }
 
+/**
+ * One drained item, with the budget treated as "not now" instead of "failed".
+ *
+ * A held item keeps its attempts: a month at the ceiling is a state of the
+ * workspace, not a defect in the row, and burying the row as dead would lose a
+ * meeting that only needed to wait.
+ */
+async function runDrainedEvent(
+  store: UpstashClient,
+  event: SyncEvent,
+  config: NotionConfig,
+  client?: ReturnType<typeof createNotionClient>,
+): Promise<{ ok: boolean; action?: string; pageId?: string; reason?: string }> {
+  try {
+    return await runEvent(store, event, { config, ...(client ? { client } : {}) });
+  } catch (error) {
+    if (error instanceof NotionError && error.code === 'row_budget_exceeded') {
+      return { ok: false, reason: 'row_budget_exceeded' };
+    }
+    throw error;
+  }
+}
+
+const holdOnBudget = (outcome: { reason?: string }): boolean => outcome.reason === 'row_budget_exceeded';
+
 /** The design's "one item on the next sync request". Never awaited by a caller. */
 async function drainOneWaiting(store: UpstashClient, config: NotionConfig): Promise<DrainResult[]> {
   try {
     return await drainOutbox(store, {
       limit: 1,
-      run: event => runEvent(store, event, { config }),
+      run: event => runDrainedEvent(store, event, config),
+      hold: holdOnBudget,
       onResult: async result => {
+        if (result.held) {
+          if (await markBudgetStop(store).catch(() => false)) {
+            await logAudit(store, 'notion.budget.stop', { detail: `${result.id}: row budget full; kept for next month` });
+          }
+          return;
+        }
         if (!result.ok) {
           await logAudit(store, result.dead ? 'notion.sync.dead' : 'notion.sync.failed', {
             detail: `${result.id}: ${redactSecretText(result.error ?? 'failed')} · attempts ${result.attempts}`,
@@ -1007,7 +1182,9 @@ export interface DrainReport {
   succeeded: number;
   failed: number;
   dead: number;
-  results: Array<{ id: string; ok: boolean; action?: string; attempts: number; dead: boolean; error?: string }>;
+  /** Items kept for later because the month's row budget is spent. */
+  held: number;
+  results: Array<{ id: string; ok: boolean; action?: string; attempts: number; dead: boolean; held?: boolean; error?: string }>;
   calls: number;
 }
 
@@ -1023,14 +1200,21 @@ export async function drainOutboxNow(
 ): Promise<DrainReport> {
   const config = options.config ?? notionConfig();
   if (config.syncMode === 'off' || config.syncMode === 'read') {
-    return { processed: 0, succeeded: 0, failed: 0, dead: 0, results: [], calls: 0 };
+    return { processed: 0, succeeded: 0, failed: 0, dead: 0, held: 0, results: [], calls: 0 };
   }
   const client = createNotionClient({ maxCalls: 120 });
   const results = await drainOutbox(store, {
     limit: options.limit ?? 20,
     ...(options.now !== undefined ? { now: () => options.now as number } : {}),
-    run: event => runEvent(store, event, { client, config }),
+    run: event => runDrainedEvent(store, event, config, client),
+    hold: holdOnBudget,
     onResult: async result => {
+      if (result.held) {
+        if (await markBudgetStop(store).catch(() => false)) {
+          await logAudit(store, 'notion.budget.stop', { detail: `${result.id}: row budget full; kept for next month` });
+        }
+        return;
+      }
       if (!result.ok) {
         await logAudit(store, result.dead ? 'notion.sync.dead' : 'notion.sync.failed', {
           detail: `${result.id}: ${redactSecretText(result.error ?? 'failed')} · attempts ${result.attempts}`,
@@ -1046,14 +1230,16 @@ export async function drainOutboxNow(
   return {
     processed: results.length,
     succeeded: results.filter(result => result.ok).length,
-    failed: results.filter(result => !result.ok && !result.dead).length,
+    failed: results.filter(result => !result.ok && !result.dead && !result.held).length,
     dead: results.filter(result => result.dead).length,
+    held: results.filter(result => result.held === true).length,
     results: results.map(result => ({
       id: result.id,
       ok: result.ok,
       ...(result.action ? { action: result.action } : {}),
       attempts: result.attempts,
       dead: result.dead,
+      ...(result.held ? { held: true } : {}),
       ...(result.error ? { error: redactSecretText(result.error) } : {}),
     })),
     calls: client.stats.calls,

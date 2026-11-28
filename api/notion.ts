@@ -27,6 +27,7 @@ import {
   type NotionConfig,
 } from './_notion/client.js';
 import { NOTION_DATABASES, bootstrapNotion, loadNotionSchema, repairNotion, selftestNotion } from './_notion/schema.js';
+import { readBudget, saveMonthlyLimit } from './_notion/budget.js';
 import {
   BACKFILL_KINDS,
   backfillNotion,
@@ -170,8 +171,11 @@ async function handleStatus(req: VercelRequest, res: VercelResponse, store: Stor
       fulltext: config.minutesFulltext,
       maxChars: config.minutesMaxChars,
     },
-    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill'],
+    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill', 'budget'],
   };
+  // The month's row numbers live in Redis, so the dashboard can show "92 / 300
+  // rows · warning" without spending a single Notion call (§5.5, Phase 5 card).
+  if (store) payload.budget = await readBudget(store).catch(() => null);
   if (!auth.configured) payload.setup = setupInstructions(auth);
   if (session) {
     payload.schema = await schemaSummary(store, normalizeNotionId(process.env.NOTION_ROOT_PAGE_ID), Date.now());
@@ -286,6 +290,45 @@ async function handleDrain(req: VercelRequest, res: VercelResponse, store: Store
   send(res, 200, { ok: report.failed === 0 && report.dead === 0, mode: config.syncMode, ...report });
 }
 
+/** `budget`: read the month's row numbers, or raise/lower the allowance. */
+async function handleBudget(req: VercelRequest, res: VercelResponse, store: Store): Promise<void> {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const patch = (body.patch && typeof body.patch === 'object' ? body.patch : {}) as Record<string, unknown>;
+  // `null` is a value here ("put the limit back"), so `??` would swallow it.
+  const hasOwn = (target: Record<string, unknown>) => Object.prototype.hasOwnProperty.call(target, 'monthlyLimit');
+  const raw = hasOwn(patch) ? patch.monthlyLimit : hasOwn(body) ? body.monthlyLimit : undefined;
+  if (raw === undefined) {
+    send(res, 200, { ok: true, budget: await readBudget(store) });
+    return;
+  }
+  if (raw === null) {
+    // `null` puts the allowance back under the environment variable.
+    const budget = await saveMonthlyLimit(store, null);
+    await audit(store, OWNER, 'notion.budget.limit', { detail: 'limit reset to NOTION_ROW_BUDGET_MONTHLY' });
+    send(res, 200, { ok: true, budget });
+    return;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 100_000) {
+    throw new NotionError(
+      'monthlyLimit must be a whole number between 0 and 100,000.',
+      'notion_invalid_request',
+      400,
+    );
+  }
+  const limit = Math.round(value);
+  if (!await withinRateLimit(store, `notion-budget:${digest(clientIp(req))}`, 10)) {
+    res.setHeader('Retry-After', '60');
+    send(res, 429, { error: 'rate_limited', message: 'Too many budget changes in a minute. Wait a moment.' });
+    return;
+  }
+  const budget = await saveMonthlyLimit(store, limit);
+  await audit(store, OWNER, 'notion.budget.limit', {
+    detail: `monthlyLimit ${limit} · used ${budget.used}/${budget.limit} (${budget.month} KST)`,
+  });
+  send(res, 200, { ok: true, budget });
+}
+
 /** `backfill`: write what Redis already holds — resumable with `cursor`. */
 async function handleBackfill(req: VercelRequest, res: VercelResponse, store: Store): Promise<void> {
   const config = notionConfig();
@@ -358,6 +401,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     if (action === 'bootstrap') { await handleBootstrap(req, res, store); return; }
     if (action === 'repair') { await handleRepair(req, res, store); return; }
     if (action === 'drain') { await handleDrain(req, res, store); return; }
+    if (action === 'budget') { await handleBudget(req, res, store); return; }
     if (action === 'backfill') { await handleBackfill(req, res, store); return; }
 
     throw new NotionError(`Unknown Notion action "${action}".`, 'notion_invalid_request', 400);
