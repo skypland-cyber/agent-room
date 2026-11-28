@@ -301,6 +301,10 @@ async function loadRooms(store: UpstashClient, codes: string[]): Promise<LoadedR
 }
 
 function taskRef(code: string, roomTopic: string, task: Task): OfficeTaskRef {
+  // A lease attempt is minted for every claim and recovery, so counting the
+  // attempts that ended in a submission is what "how many times was this
+  // submitted" means — two interrupted runs must not read as two submissions.
+  const submitted = task.attempts?.filter(attempt => attempt.status === 'submitted').length ?? 0;
   return {
     code,
     roomTopic,
@@ -314,6 +318,14 @@ function taskRef(code: string, roomTopic: string, task: Task): OfficeTaskRef {
     ...(typeof task.retryCount === 'number' ? { retryCount: task.retryCount } : {}),
     ...(task.qa ? { qaStatus: task.qa.status } : {}),
     ...(task.approval?.note ? { approvalNote: task.approval.note } : {}),
+    ...(task.state === 'awaiting_review' ? {
+      review: {
+        requestedAt: task.reviewRequestedAt ?? task.evidence?.at ?? task.updatedAt,
+        ...(submitted > 0 ? { attempt: submitted } : {}),
+        deliverableCount: new Set(task.files?.deliverables ?? []).size,
+        ...(task.verdict?.note ? { previousVerdict: redactSecretText(task.verdict.note).slice(0, 240) } : {}),
+      },
+    } : {}),
   };
 }
 

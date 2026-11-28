@@ -109,11 +109,17 @@ function TaskRow({ task, onChanged, run, busy }: {
 export function OfficeWorkPanel({ overview, onChanged }: Props) {
   const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
+  const [reviewer, setReviewer] = useState('');
   /** The last handoff's outcome, shown once under the rooms list. */
   const [handoff, setHandoff] = useState<{ ok: string; skipped: string[] } | null>(null);
   const { busy, error, run } = useOfficeAction(onChanged);
   const running = overview.openTasks.filter(task => task.state !== 'pending_approval');
   const visible = showAll ? running : running.slice(0, 12);
+  const reviews = running.filter(task => task.state === 'awaiting_review');
+  const reviewers = [...new Set(reviews.flatMap(task => task.verifier ? [task.verifier] : []))].sort();
+  const filter = reviewers.includes(reviewer) ? reviewer : '';
+  const reviewQueue = reviews.filter(task => !filter || task.verifier === filter)
+    .sort((a, b) => (a.review?.requestedAt ?? a.updatedAt) - (b.review?.requestedAt ?? b.updatedAt));
 
   return (
     <div className="grid gap-5">
@@ -128,6 +134,37 @@ export function OfficeWorkPanel({ overview, onChanged }: Props) {
         ) : (
           <ul className="divide-y divide-border-faint">
             {overview.approvals.map(task => <TaskRow key={`${task.code}-${task.id}`} task={task} onChanged={onChanged} run={run} busy={busy} />)}
+          </ul>
+        )}
+      </Card>
+
+      <Card>
+        <SectionTitle title={t('work.review.title', { count: reviewQueue.length })} />
+        {reviewers.length > 0 ? (
+          <label className="flex items-center gap-2 text-sm">
+            {t('work.review.verifier')}
+            <select value={filter} onChange={event => setReviewer(event.target.value)} className="rounded border border-border bg-white px-2 py-1">
+              <option value="">{t('work.review.all')}</option>
+              {reviewers.map(name => <option key={name} value={name}>{name}</option>)}
+            </select>
+          </label>
+        ) : null}
+        {reviewQueue.length === 0 ? <Empty>{t('work.review.empty')}</Empty> : (
+          <ul className="divide-y divide-border-faint">
+            {reviewQueue.map(task => (
+              <li key={task.code + ':' + task.id} className="py-3">
+                <p className="font-semibold">{task.id} · {task.title}</p>
+                <p className="text-sm">{task.verifier || t('work.review.unassigned')} · {formatDate(task.review?.requestedAt ?? task.updatedAt)}</p>
+                {task.review ? (
+                  <p className="text-sm">
+                    {task.review.attempt !== undefined ? t('work.review.attempt', { count: task.review.attempt }) + ' · ' : ''}
+                    {t('work.review.files', { count: task.review.deliverableCount })}
+                  </p>
+                ) : null}
+                {task.review?.previousVerdict ? <p className="text-sm">{t('work.review.previous', { note: task.review.previousVerdict })}</p> : null}
+                <a className="text-sm underline" href={`/r/${encodeURIComponent(task.code)}?taskFiles=${encodeURIComponent(task.id)}`}>{t('work.review.open')}</a>
+              </li>
+            ))}
           </ul>
         )}
       </Card>

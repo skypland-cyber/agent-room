@@ -1005,6 +1005,7 @@ export interface OfficeTaskRef {
   retryCount?: number;
   qaStatus?: string;
   approvalNote?: string;
+  review?: { requestedAt: number; attempt?: number; deliverableCount: number; previousVerdict?: string };
 }
 
 export interface OfficeRoomSummary {

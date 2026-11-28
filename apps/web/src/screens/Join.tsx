@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams, useNavigate } from 'react-router-dom';
+import { Link, useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { createClient, getRoom, joinRoom, HostNameTakenError, RoomNotFoundError } from '../lib/roomApi.js';
 import type { Room } from '@agent-room/shared';
 import { isValidCode, CODE_LEN, ROLE_PRESETS } from '@agent-room/shared';
@@ -15,6 +15,8 @@ function withDashes(s: string) { return s.match(/.{1,3}/g)?.join('-') ?? s; }
 export function Join() {
   const { code: codeParam = '' } = useParams();
   const navigate = useNavigate();
+  const [search] = useSearchParams();
+  const taskFiles = search.get('taskFiles');
   const [raw, setRaw] = useState(stripDashes(codeParam));
   const [room, setRoom] = useState<Room | null>(null);
   const [name, setName] = useState('');
@@ -53,7 +55,7 @@ export function Join() {
       // Persist whatever the server actually assigned so future writes use it.
       const finalName = result.participant.name;
       sessionStorage.setItem(`room:${room.code}:self`, JSON.stringify({ name: finalName, role: role.trim() }));
-      navigate(`/r/${room.code}`);
+      navigate(`/r/${room.code}${taskFiles && /^T-\d+$/i.test(taskFiles) ? '?taskFiles=' + encodeURIComponent(taskFiles.toUpperCase()) : ''}`);
     } catch (e) {
       if (e instanceof HostNameTakenError) {
         setErr(`The name "${name.trim()}" is reserved for the host of this room. Pick a different display name.`);
