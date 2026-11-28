@@ -9,6 +9,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { OfficeAgentView, OfficeOverview } from '@agent-room/shared';
 import { PixelOffice } from './pixel/PixelOffice.js';
 import { ControlCenter } from './iso/ControlCenter.js';
+import { OfficeDiorama } from './iso/OfficeDiorama.js';
+import { OfficeWorkshopRoutines } from './OfficeWorkshopRoutines.js';
 import { OfficeAgentPanel } from './pixel/OfficeAgentPanel.js';
 import { OfficeStaffPanel } from './OfficeStaffPanel.js';
 import { OfficeProjectsPanel } from './OfficeProjectsPanel.js';
@@ -304,5 +306,25 @@ describe('office screens render', () => {
     expect(staff).toContain('연결 끊김 의심 · 업무 보류');
     expect(staff).toContain('복구 2회');
     expect(staff).toContain('마지막 정상 연결');
+  });
+
+  it('renders the 3D diorama as a list a keyboard and a phone can both use', () => {
+    const html = renderToStaticMarkup(<OfficeDiorama agents={agents} generatedAt={now} />);
+    // Every agent is a button that names itself and its state for a screen reader.
+    expect(html).toContain('Qwen, 작업 중 — 상세 보기');
+    expect(html).toContain('Codex, 오프라인 — 상세 보기');
+    // The drawer is closed until a badge is pressed, so the page is not a dialog.
+    expect(html).not.toContain('showModal');
+    expect(html).toContain('<dialog');
+  });
+
+  it('renders the workshop routines before their status has arrived', () => {
+    // The fetch runs in an effect, so the server render is the loading state:
+    // no invented schedule and no zero counts.
+    const html = renderToStaticMarkup(<OfficeWorkshopRoutines />);
+    expect(html).toContain('정기 루틴');
+    expect(html).toContain('반복 실행 일정과 최근 실행 결과를 확인합니다.');
+    expect(html).toContain('정기 루틴을 불러오는 중…');
+    expect(html).not.toContain('저장 완료');
   });
 });

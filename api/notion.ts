@@ -173,7 +173,7 @@ async function handleStatus(req: VercelRequest, res: VercelResponse, store: Stor
       fulltext: config.minutesFulltext,
       maxChars: config.minutesMaxChars,
     },
-    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill', 'budget', 'cron'],
+    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill', 'budget', 'cron', 'reportCron'],
   };
   // The month's row numbers live in Redis, so the dashboard can show "92 / 300
   // rows · warning" without spending a single Notion call (§5.5, Phase 5 card).
