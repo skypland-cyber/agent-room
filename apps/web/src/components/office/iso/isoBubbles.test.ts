@@ -6,6 +6,7 @@
 // what makes the arithmetic checkable.
 import { describe, expect, it } from 'vitest';
 import {
+  drivenConnectionMode,
   fitBubbleLine,
   frameTextMetrics,
   frameTextPlan,
@@ -197,6 +198,21 @@ describe('words on a phone', () => {
     // The chip's own text plus its padding, not just one or two pixels.
     expect(chipped - plain).toBeGreaterThanOrEqual(widthOf('대행') + 8);
     expect(tagWidth(widthOf, 'Gemini', metrics, 'LIVE', '')).toBe(plain);
+  });
+
+  // The floor must never badge an empty desk: offline, disabled and paused
+  // seats keep their own look, even if a stale payload still carries a mode.
+  it('draws a connection chip only on a seat that is here', () => {
+    for (const status of ['idle', 'working', 'reviewing']) {
+      expect(drivenConnectionMode(status, true, 'delegated')).toBe('delegated');
+      expect(drivenConnectionMode(status, true, 'external')).toBe('external');
+    }
+    for (const status of ['offline', 'paused']) {
+      expect(drivenConnectionMode(status, true, 'delegated')).toBeUndefined();
+    }
+    expect(drivenConnectionMode('working', false, 'delegated')).toBeUndefined();
+    // No mode in the payload: nothing to draw, whatever the state says.
+    expect(drivenConnectionMode('working', true, undefined)).toBeUndefined();
   });
 
   it('gives the boss’s tag its own place before anyone else is placed', () => {

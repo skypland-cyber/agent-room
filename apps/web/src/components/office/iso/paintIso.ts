@@ -1495,6 +1495,25 @@ function drawCeo(ctx: Ctx, ceo: IsoCeoScene, timeMs: number, label: string): voi
   drawCharacter(ctx, { x: point.x, y: point.y - 1 }, paint, timeMs, 0, false);
 }
 
+/**
+ * The states in which a seat has a mode to show: it is here, and something is
+ * holding it. An offline or paused desk has no current answer, so it draws none.
+ */
+const DRIVEN_STATUSES = new Set(['idle', 'working', 'reviewing']);
+
+/**
+ * The connection chip a seat is allowed to show, if any.
+ *
+ * Kept as its own function so the rule is testable without a canvas: a seat that
+ * is offline, disabled or paused has no mode to draw, however stale the payload
+ * it arrived in. The server already leaves the field off in those states; this is
+ * the painter keeping the same promise with its own eyes.
+ */
+export function drivenConnectionMode(status: string, enabled: boolean, mode: string | undefined): string | undefined {
+  if (!mode || !enabled) return undefined;
+  return DRIVEN_STATUSES.has(status) ? mode : undefined;
+}
+
 export interface FrameOptions {
   view: IsoView;
   width: number;
@@ -1546,7 +1565,14 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
       palette: paletteFor(agent.name, index),
       reality: realityOf({ status: agent.status, enabled: agent.enabled ?? true, needsBoss: scene.needsBoss, rest: scene.rest, zone: scene.zone }),
       walking: options.movingIds?.includes(scene.agentId) ?? false,
-      ...(agent.connectionMode ? { connectionMode: agent.connectionMode } : {}),
+      // The server only sends a mode for a seat that is here, and the painter
+      // holds the same line: an empty desk is drawn empty, whatever a stale
+      // payload still carries. A chip on an offline seat would be the one lie
+      // this floor cannot afford.
+      ...(() => {
+        const mode = drivenConnectionMode(agent.status, agent.enabled ?? true, agent.connectionMode);
+        return mode ? { connectionMode: mode } : {};
+      })(),
     });
   });
 
