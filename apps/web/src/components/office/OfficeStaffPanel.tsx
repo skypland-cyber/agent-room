@@ -8,6 +8,7 @@ import { useState } from 'react';
 import type { OfficeAgent, OfficeAgentView } from '@agent-room/shared';
 import { deleteAgent, pauseAgent, saveAgent } from '../../lib/officeApi.js';
 import { Badge, Button, Card, Empty, ErrorNote, Field, Input, SectionTitle, TextArea, timeAgo, useOfficeAction } from './ui.js';
+import { ConnectionBadge } from './ConnectionBadge.js';
 import { useI18n } from '../../i18n/index.js';
 import { linkStateLabel, presenceLabel } from '../../i18n/labels.js';
 
@@ -79,6 +80,12 @@ export function OfficeStaffPanel({ agents, onChanged }: Props) {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-semibold text-ink">{agent.name}</span>
                     <Badge tone={STATUS_TONE[agent.presence.status] ?? 'neutral'}>{presenceLabel(agent.presence, agent.enabled)}</Badge>
+                    {/* Who is driving the seat: an AI client the boss opened
+                        (emerald) or 망고 holding the seat for it (violet).
+                        Only while the seat is online — an offline desk has no
+                        current answer, and the presence badge beside it
+                        already says so. */}
+                    <ConnectionBadge mode={agent.presence.connectionMode} />
                     {/* Presence only gives up at ten minutes; a seat that went
                         quiet mid-task is the case somebody has to act on before
                         then, so the link state sits beside it. */}

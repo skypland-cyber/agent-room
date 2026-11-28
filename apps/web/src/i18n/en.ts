@@ -115,6 +115,14 @@ export const en: Record<MessageKey, string> = {
   'presence.offline': 'offline',
   'presence.disabled': 'disabled',
 
+  // How a seat is being driven: the short chip on a name tag, the full badge on a card.
+  'conn.external': 'EXT',
+  'conn.delegated': 'DEL',
+  'conn.external.full': 'External client',
+  'conn.delegated.full': 'Delegated by Mango',
+  'conn.external.hint': 'An AI client you opened is sitting in this seat.',
+  'conn.delegated.hint': 'Mango is holding this staff seat and doing the work, with no client window open.',
+
   'qa.pending': 'pending',
   'qa.passed': 'passed',
   'qa.failed': 'failed',
@@ -190,6 +198,8 @@ export const en: Record<MessageKey, string> = {
   'staff.empty': 'No AI staff yet. Add one on the right, then open a room and let it listen.',
   'staff.badge.approval': 'Approval needed',
   'staff.badge.disabled': 'Disabled',
+  'staff.badge.external': 'External client',
+  'staff.badge.delegated': 'Delegated by Mango',
   'staff.meta.tags': 'Tags: {tags} · ',
   'staff.meta.today': 'Today {used}/{limit} · ',
   'staff.meta.heartbeat': 'heartbeat {time}',
@@ -774,6 +784,8 @@ export const en: Record<MessageKey, string> = {
   'iso.legend.anim': 'STAGED — a free agent walking, sipping coffee or sitting down',
   'iso.legend.liveCount': '{count} real',
   'iso.legend.animCount': '{count} staged',
+  'iso.legend.conn.external': 'EXT — an AI client you opened yourself',
+  'iso.legend.conn.delegated': 'DEL — a seat Mango is driving for it',
 
   // ── observation mode ──────────────────────────────────────────────────────
   'iso.observe.enter': 'Observation mode',

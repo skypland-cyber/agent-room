@@ -20,19 +20,24 @@ import { OfficeTodayCard, UsageGauge } from './OfficeTodayCard.js';
 
 const now = 1_800_000_000_000;
 
-function agent(id: string, name: string, status: OfficeAgentView['presence']['status']): OfficeAgentView {
+function agent(
+  id: string,
+  name: string,
+  status: OfficeAgentView['presence']['status'],
+  connectionMode?: OfficeAgentView['presence']['connectionMode'],
+): OfficeAgentView {
   return {
     id, name, role: `${name} role`, tags: ['copy'], dailyTaskLimit: 20, requiresApproval: false,
     paused: status === 'paused', enabled: true, createdAt: now, updatedAt: now, createdBy: 'owner',
-    presence: { status, label: status, heartbeatAgeMs: 30_000 },
+    presence: { status, label: status, heartbeatAgeMs: 30_000, ...(connectionMode ? { connectionMode } : {}) },
     tasksToday: 2, remainingToday: 18,
   };
 }
 
 const agents = [
-  agent('ag_1', 'Qwen', 'working'),
-  agent('ag_2', 'Pixel', 'reviewing'),
-  agent('ag_3', 'GPT', 'idle'),
+  agent('ag_1', 'Qwen', 'working', 'delegated'),
+  agent('ag_2', 'Pixel', 'reviewing', 'external'),
+  agent('ag_3', 'GPT', 'idle', 'external'),
   agent('ag_4', 'Gemini', 'paused'),
   agent('ag_5', 'Codex', 'offline'),
 ];
@@ -134,6 +139,9 @@ describe('office screens render', () => {
     expect(html).toContain('승인 대기 1건');
     expect(html).toContain('Qwen');
     expect(html).toContain('오늘 2/20');
+    // How each seat is being driven, in the legend and in the staff list.
+    expect(html).toContain('외부 접속 — 직접 켠 AI 클라이언트');
+    expect(html).toContain('망고 대행 — 망고가 대신 움직이는 좌석');
     expect(html).toContain('QWE-RTY-234');
     expect(html).toContain('D-2');
     // The boss's own avatar: a tag, the room it is standing in, and the pad that
@@ -191,6 +199,12 @@ describe('office screens render', () => {
     const html = renderToStaticMarkup(<OfficeStaffPanel agents={agents} onChanged={() => undefined} />);
     expect(html).toContain('Qwen role');
     expect(html).toContain('오늘 2/20');
+    // Who is driving each seat: 망고 holding Qwen's, an outside client on Pixel
+    // and GPT. A seat with no mode (older heartbeat, or offline) gets neither.
+    expect(html).toContain('망고 대행');
+    expect(html).toContain('외부 접속');
+    expect(html.match(/망고 대행/g)).toHaveLength(1);
+    expect(html.match(/외부 접속/g)).toHaveLength(2);
   });
 
   it('renders projects with memory and instructions', () => {

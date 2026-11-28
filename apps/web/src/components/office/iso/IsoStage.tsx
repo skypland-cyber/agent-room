@@ -27,7 +27,7 @@ import { routeBetween } from './isoRoute.js';
 import { IsoMinimap } from './IsoMinimap.js';
 import { OfficeAgentPanel } from '../pixel/OfficeAgentPanel.js';
 import { timeAgo } from '../ui.js';
-import { presenceLabel } from '../../../i18n/labels.js';
+import { connectionModeChip, connectionModeLabel, presenceLabel } from '../../../i18n/labels.js';
 import { useI18n, type MessageKey } from '../../../i18n/index.js';
 import type { ControlCenterTab } from './ControlCenter.js';
 
@@ -385,7 +385,13 @@ export function IsoStage(props: IsoStageProps) {
         height: cssH,
         dpr,
         scenes: animated,
-        agents: agents.map(agent => ({ id: agent.id, name: agent.name, status: agent.presence.status, enabled: agent.enabled })),
+        agents: agents.map(agent => ({
+          id: agent.id,
+          name: agent.name,
+          status: agent.presence.status,
+          enabled: agent.enabled,
+          ...(agent.presence.connectionMode ? { connectionMode: agent.presence.connectionMode } : {}),
+        })),
         ...(selectedId ? { selectedId } : {}),
         ...(hoverRef.current.agentId ? { hoveredId: hoverRef.current.agentId } : {}),
         hoveredZone: hoverRef.current.zone,
@@ -393,6 +399,7 @@ export function IsoStage(props: IsoStageProps) {
         compact,
         movingIds: movingRef.current,
         chipLabels: { live: tr('iso.chip.live'), anim: tr('iso.chip.anim') },
+        connectionChips: { external: connectionModeChip('external'), delegated: connectionModeChip('delegated') },
         ceo: {
           pos: ceoRef.current.pos,
           facing: ceoRef.current.facing,
@@ -824,7 +831,12 @@ export function IsoStage(props: IsoStageProps) {
   const hoverLabel = useMemo(() => {
     if (hover.agentId) {
       const agent = agents.find(row => row.id === hover.agentId);
-      if (agent) return `${agent.name} · ${presenceLabel(agent.presence, agent.enabled)}`;
+      if (agent) {
+        // The hover line is the only place a desktop reader can get the words
+        // behind the tag's two chips, so both are spelled out here.
+        const mode = connectionModeLabel(agent.presence.connectionMode);
+        return [agent.name, presenceLabel(agent.presence, agent.enabled), mode].filter(Boolean).join(' · ');
+      }
     }
     if (hover.zone && hover.zone !== 'plaza') {
       return `${tr(ZONE_NAME[hover.zone])} · ${tr(ZONE_HINT[hover.zone])}`;
@@ -1107,6 +1119,18 @@ function FocusCard({ agent, reality, zone, following, onFollow, onDetail }: {
       <div className="flex items-center gap-1.5">
         <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: statusColor(agent.presence.status) }} />
         <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-white">{agent.name}</span>
+        {agent.presence.connectionMode ? (
+          <span
+            title={agent.presence.connectionMode === 'delegated' ? tr('conn.delegated.hint') : tr('conn.external.hint')}
+            className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ${
+              agent.presence.connectionMode === 'delegated'
+                ? 'bg-violet-400/25 text-violet-100 ring-1 ring-violet-300/40'
+                : 'bg-emerald-400/25 text-emerald-100 ring-1 ring-emerald-300/40'
+            }`}
+          >
+            {connectionModeLabel(agent.presence.connectionMode)}
+          </span>
+        ) : null}
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ${
           reality.live ? 'bg-sky-400/25 text-sky-100' : 'border border-dashed border-white/40 text-white/65'
         }`}>

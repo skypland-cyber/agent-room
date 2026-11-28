@@ -468,6 +468,9 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
     const heartbeat = heartbeats[key];
     const presence = agentPresence(agent, {
       ...(heartbeat ? { heartbeatAt: heartbeat.at } : {}),
+      // How the seat is being driven rides with the stamp: an outside client, or
+      // the boss's own assistant holding the seat for it.
+      ...(heartbeat?.connectionMode ? { connectionMode: heartbeat.connectionMode } : {}),
       active: ownedByAgent.get(key) ?? [],
       reviews: reviewsByAgent.get(key) ?? [],
       ...(heartbeat?.reconnects !== undefined ? { reconnects: heartbeat.reconnects } : {}),

@@ -175,6 +175,12 @@ export interface DrainResult {
   pageId?: string;
   attempts: number;
   dead: boolean;
+  /**
+   * True when the item was put back without counting a failure: the row cannot
+   * be written *yet* (the month's row budget is spent), which is not the item's
+   * fault and must not use up its attempts.
+   */
+  held?: boolean;
   error?: string;
 }
 
@@ -185,6 +191,12 @@ export interface DrainOptions {
   run: (event: SyncEvent) => Promise<{ ok: boolean; action?: string; pageId?: string; reason?: string }>;
   /** Called for every item, drained or dead — the caller writes the audit line. */
   onResult?: (result: DrainResult, event: SyncEvent | null) => Promise<void> | void;
+  /**
+   * True when a failure means "not now". A held item goes back to the oldest end
+   * of the queue with its attempts untouched, so a month at the row budget does
+   * not bury a meeting as dead before the month turns.
+   */
+  hold?: (outcome: { reason?: string }) => boolean;
   now?: () => number;
 }
 
@@ -235,8 +247,15 @@ export async function drainOutbox(store: UpstashClient, options: DrainOptions): 
       continue;
     }
     const attempts = item.attempts + 1;
-    const dead = attempts > OUTBOX_MAX_ATTEMPTS;
     const message = outcome.reason ?? 'failed';
+    if (options.hold?.({ ...(outcome.reason ? { reason: outcome.reason } : {}) }) === true) {
+      await store.command(['RPUSH', OUTBOX_LIST_KEY, id]).catch(() => undefined);
+      const held: DrainResult = { id, ok: false, attempts: item.attempts, dead: false, held: true, error: message };
+      results.push(held);
+      if (options.onResult) await options.onResult(held, item.event);
+      continue;
+    }
+    const dead = attempts > OUTBOX_MAX_ATTEMPTS;
     await store.command([
       'SET', outboxItemKey(id),
       JSON.stringify({ ...item, attempts, lastAt: now(), lastError: message.slice(0, 400) }),

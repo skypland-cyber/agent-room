@@ -15,6 +15,7 @@ import type {
   OfficeArchive,
   OfficeArchiveFile,
   OfficeAuditEntry,
+  OfficeConnectionMode,
   OfficeGuideline,
   OfficeMemoryEntry,
   OfficeProject,
@@ -135,6 +136,13 @@ export async function saveOfficeSettings(client: UpstashClient, patch: Partial<R
 export interface AgentHeartbeat {
   at: number;
   roomCode?: string;
+  /**
+   * Who is driving this seat: an outside client (`external`, the default) or the
+   * person's own assistant working the seat for it (`delegated`). Stored in the
+   * stamp rather than on the roster entry so the answer changes with the seat,
+   * not with the staff member. Absent on stamps written before the field existed.
+   */
+  connectionMode?: OfficeConnectionMode;
   /** How long the seat was quiet before this stamp, when it came back from a gap. */
   gapMs?: number;
   /** The moment this stamp ended a gap; a resumed session starts here. */
@@ -272,7 +280,20 @@ export async function listHeartbeats(client: UpstashClient, names: string[]): Pr
  */
 export async function recordAgentHeartbeat(
   client: UpstashClient,
-  input: { name: string; roomCode?: string; at: number; throttleMs?: number; registerIfUnknown?: boolean },
+  input: {
+    name: string;
+    roomCode?: string;
+    at: number;
+    throttleMs?: number;
+    registerIfUnknown?: boolean;
+    /**
+     * Who is driving the seat. Omitted by an ordinary outside client, which is
+     * exactly what `external` means here; the assistant's own runner sends
+     * `delegated`. An unknown value falls back to `external` rather than being
+     * stored, so the badge can never claim a mode nobody asked for.
+     */
+    connectionMode?: OfficeConnectionMode;
+  },
 ): Promise<{ recorded: boolean; agentId?: string; reconnected?: boolean; gapMs?: number }> {
   const name = input.name?.trim();
   if (!name) return { recorded: false };
@@ -312,9 +333,11 @@ export async function recordAgentHeartbeat(
   // throttle above reads), and the dashboard polls under the roster name. One
   // pipeline, so a decorated name costs one round trip, not two.
   const reconnects = Math.max(0, Math.min(99_999, (previous?.reconnects ?? 0) + (reconnected ? 1 : 0)));
+  const connectionMode: OfficeConnectionMode = input.connectionMode === 'delegated' ? 'delegated' : 'external';
   const stamp: AgentHeartbeat = {
     at: input.at,
     ...(input.roomCode ? { roomCode: input.roomCode } : {}),
+    connectionMode,
     ...(reconnects > 0 ? { reconnects } : {}),
     ...(reconnected && gapMs !== undefined
       ? { gapMs, resumedAt: input.at, lastGapMs: gapMs, lastDropAt: input.at - gapMs }
