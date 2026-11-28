@@ -100,14 +100,24 @@ export async function closeRoomByAutoClose(
   return room;
 }
 
-/** The room and its plan, or null when the room is already gone (expired). */
-export async function getArmedRoom(
-  client: UpstashClient,
-  code: string,
-): Promise<Room | null> {
+/**
+ * Find a room for the auto-close paths.
+ *
+ * "Gone" and "could not be read" must not look the same here: an expired room
+ * should be dropped from the index, while a transient storage failure must
+ * leave the entry alone — un-indexing a live room on a network blip would be a
+ * room that silently never closes.
+ */
+export type ArmedRoomLookup =
+  | { state: 'found'; room: Room }
+  | { state: 'missing' }
+  | { state: 'failed' };
+
+export async function lookupArmedRoom(client: UpstashClient, code: string): Promise<ArmedRoomLookup> {
   try {
-    return await getRoom(client, code);
-  } catch {
-    return null;
+    return { state: 'found', room: await getRoom(client, code) };
+  } catch (error) {
+    const name = (error as { name?: string }).name;
+    return name === 'RoomNotFoundError' ? { state: 'missing' } : { state: 'failed' };
   }
 }

@@ -258,6 +258,26 @@ describe('a room whose work is done', () => {
     expect((await room()).autoClose).toBeUndefined();
   });
 
+  it('does not drop a scheduled close when storage hiccups', async () => {
+    const now = Date.now();
+    const store = await seedRoom({ states: ['done'], now });
+    const { syncRoomAutoClose, officeStore } = await import('./_office.js');
+    await syncRoomAutoClose(store, CODE, { now });
+    expect(await armedCodes()).toContain(CODE);
+
+    // One failed read must not look like "the room is gone": a transient error
+    // that un-indexes a live room would be a room that silently never closes.
+    fake.failOnce(cmd => String(cmd[0]).toUpperCase() === 'GET' && cmd[1] === `room:${CODE}`);
+    const hiccup = await syncRoomAutoClose(officeStore(), CODE, { now: now + 11 * MINUTE });
+    expect(hiccup).toMatchObject({ state: 'none', reason: 'storage_unavailable' });
+    expect(await armedCodes()).toContain(CODE);
+    expect((await room()).status).toBe('active');
+
+    // The next attempt, with storage back, closes it as usual.
+    const after = await syncRoomAutoClose(officeStore(), CODE, { now: now + 11 * MINUTE });
+    expect(after.state).toBe('closed');
+  });
+
   it('lets the deployment pin the grace period over the office setting', async () => {
     vi.stubEnv('AUTO_CLOSE_EMPTY_ROOM_MINUTES', '3');
     const now = Date.now();

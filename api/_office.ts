@@ -38,8 +38,8 @@ import {
   registerOfficeRoom,
   clearRoomAutoClose,
   closeRoomByAutoClose,
-  getArmedRoom,
   getMessageTotalCount,
+  lookupArmedRoom,
   listArmedAutoCloseRooms,
   unindexRoomAutoClose,
   writeRoomAutoClose,
@@ -905,12 +905,18 @@ export async function syncRoomAutoClose(
   const now = options.now ?? Date.now();
   const settings = options.settings ?? await getOfficeSettings(store).catch(() => OFFICE_DEFAULT_SETTINGS);
   const graceMinutes = autoCloseGraceMinutes(settings);
-  const room = await getArmedRoom(store, code);
-  if (!room) {
+  const found = await lookupArmedRoom(store, code);
+  if (found.state === 'failed') {
+    // Storage is having a moment. Saying nothing is the honest answer: the
+    // plan stays as it was and the next trigger tries again.
+    return { code, state: 'none', reason: 'storage_unavailable' };
+  }
+  if (found.state === 'missing') {
     // Expired or deleted: no plan to keep, and the index entry is now a lie.
     await unindexRoomAutoClose(store, code).catch(() => undefined);
     return { code, state: 'none' };
   }
+  const room = found.room;
   // The cheap exit: a room that is not scheduled, with the rule switched off,
   // costs nothing beyond the room read the caller already had to do anyway.
   if (!room.autoClose && graceMinutes <= 0) return { code, state: 'none' };
@@ -969,11 +975,13 @@ export async function sweepAutoCloseRooms(
   let handled = 0;
   for (const code of armedCodes) {
     if (handled >= limit) break;
-    const room = await getArmedRoom(store, code);
-    if (!room) {
+    const found = await lookupArmedRoom(store, code);
+    if (found.state === 'failed') continue;
+    if (found.state === 'missing') {
       await unindexRoomAutoClose(store, code).catch(() => undefined);
       continue;
     }
+    const room = found.room;
     if (room.status !== 'active' || !room.autoClose) {
       // Ended by a person, or already swept: both mean the entry is done with.
       await unindexRoomAutoClose(store, code).catch(() => undefined);
