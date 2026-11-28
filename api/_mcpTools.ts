@@ -35,6 +35,7 @@ import {
   AVATAR_PALETTE,
   buildRoomContextView,
   normalizeEscapedWhitespace,
+  parseOfficeConnectionMode,
   redactSecretText,
   ROOM_POLICY_VERSION,
   roomPolicySummary,
@@ -52,7 +53,7 @@ import {
   linkRecoveryNote,
   linkRecoverySentence,
 } from '@agent-room/shared';
-import type { ClientKind, LinkRecoveryNote, Message, Participant, Room, TaskBoard, Task, TaskInbox } from '@agent-room/shared';
+import type { ClientKind, LinkRecoveryNote, Message, OfficeConnectionMode, Participant, Room, TaskBoard, Task, TaskInbox } from '@agent-room/shared';
 import { appendAuditSafe, auditEntry, buildRoomRetro, findAgentForRoomName, isConfiguredModerator, recordAgentHeartbeat } from '@agent-room/upstash-client';
 import type { TaskBoard as RetroBoard } from '@agent-room/shared';
 import {
@@ -752,6 +753,41 @@ const CODE_PROP = { type: 'string', description: '9-character dashed room code, 
 const NAME_PROP = { type: 'string', description: 'Your display name' };
 const SEAT_PROP = { type: 'string', description: 'Private seatKey returned by room_join or room_create' };
 
+/**
+ * How the office draws this seat.
+ *
+ * A client a person opened sends nothing and is read as `external`, which is the
+ * common case. An assistant's own runner keeping a seat warm without a client
+ * window (a scheduled loop, a script) says `delegated` so the floor can show the
+ * seat is being worked on that staff member's behalf rather than talking to
+ * somebody. The value only labels presence — it grants nothing.
+ */
+const CONNECTION_MODE_PROP = {
+  type: 'string',
+  enum: ['external', 'delegated'],
+  description: 'Optional presence label for the office dashboard: "external" (default) = a client you opened is polling here; "delegated" = the user\'s assistant is holding this seat and doing the work on your behalf. Shorthand: delegated: true.',
+};
+const DELEGATED_PROP = {
+  type: 'boolean',
+  description: 'Shorthand for connectionMode: "delegated". Ignored when connectionMode is given.',
+};
+
+/**
+ * The connection mode a call asked for, if any.
+ *
+ * An unknown string is treated as "not given" rather than as an error: the label
+ * is cosmetic, and a client that misspells it should still be able to join.
+ * Leaving it out stays distinct from saying `external`, so this returns
+ * `undefined` in that case and the store writes its own default.
+ */
+export function connectionModeFromArgs(a: Record<string, unknown>): OfficeConnectionMode | undefined {
+  const explicit = parseOfficeConnectionMode(a.connectionMode);
+  if (explicit) return explicit;
+  if (a.delegated === true) return 'delegated';
+  if (a.delegated === false) return 'external';
+  return undefined;
+}
+
 export const CORE_TOOLS: ToolDef[] = [
   {
     name: 'room_create',
@@ -780,6 +816,8 @@ export const CORE_TOOLS: ToolDef[] = [
         role: { type: 'string', description: 'Your role (optional)' },
         hostKey: { type: 'string', description: 'Only when rejoining as the room creator: the hostKey from room_create' },
         seatKey: { type: 'string', description: 'The seatKey a previous room_join returned. Send it to get your old seat back after a restart; without it a room already holding your name gives you a numbered one ("Claude (2)").' },
+        connectionMode: CONNECTION_MODE_PROP,
+        delegated: DELEGATED_PROP,
       },
     },
   },
@@ -833,6 +871,8 @@ export const CORE_TOOLS: ToolDef[] = [
             + 'Nothing is skipped either way — the cursor advances the same. Use "addressed" in busy rooms where you '
             + 'are not expected to answer every message; keep "any" if you are moderating or want every line as it lands.',
         },
+        connectionMode: CONNECTION_MODE_PROP,
+        delegated: DELEGATED_PROP,
       },
     },
   },
@@ -1682,6 +1722,10 @@ async function dispatch(
     }
 
     case 'room_join': {
+      // Presence label for the office floor: `delegated` when the boss's own
+      // runner is holding the seat, `external` (the store's default) when a
+      // client the boss opened is doing the polling.
+      const connectionMode = connectionModeFromArgs(a);
       // Seat under the roster name when the office knows this agent: an agent
       // that introduces itself as "망고 (총괄 매니저)" would otherwise sit in the
       // room under a name that neither its heartbeat nor the tasks the boss
@@ -1707,7 +1751,12 @@ async function dispatch(
       // Office presence: a join is the first heartbeat of a session. Awaited
       // here (not fire-and-forget as on the listen path) because the answer is
       // what tells a returning seat it was away and what it left unfinished.
-      const link = await heartbeatWithRetry(client.store, { name: finalName, roomCode: a.code, at: Date.now() })
+      const link = await heartbeatWithRetry(client.store, {
+        name: finalName,
+        roomCode: a.code,
+        at: Date.now(),
+        ...(connectionMode ? { connectionMode } : {}),
+      })
         .catch(() => ({ recorded: false } as { recorded: boolean; reconnected?: boolean; gapMs?: number }));
       const reconnect = link.reconnected && link.gapMs !== undefined
         ? { state: 'reconnected' as const, downMs: link.gapMs }
@@ -1875,14 +1924,27 @@ async function dispatch(
       const selfName = typeof a.name === 'string' && a.name.trim() ? a.name.trim() : undefined;
       // Presence for the office dashboard. Throttled inside the store (one write
       // per 30s per name), so a fast listen loop costs one read, not one write.
-      if (selfName) {
-        void heartbeatWithRetry(client.store, { name: selfName, roomCode: a.code, at: Date.now() })
-          .catch(() => ({ recorded: false }));
-      }
+      //
+      // The stamp is awaited before any return instead of fired with `void`. A
+      // fire-and-forget write lands only while the function is still alive, and
+      // two ordinary paths end the call immediately: `timeoutMs: 0` (a plain
+      // history read) and the early return after a failed read. Both used to drop
+      // the write, which the floor drew as a seat going quiet while it was in fact
+      // polling — the one thing presence must never say.
+      const listenMode = connectionModeFromArgs(a);
+      const presenceStamp = selfName
+        ? heartbeatWithRetry(client.store, {
+          name: selfName,
+          roomCode: a.code,
+          at: Date.now(),
+          ...(listenMode ? { connectionMode: listenMode } : {}),
+        }).catch(() => ({ recorded: false }))
+        : undefined;
       // timeoutMs: 0 → non-blocking history read (the old room_list_messages).
       if (a.timeoutMs === 0) {
         const listed = await listMessagesResilient(listMessages, client, a.code, since);
         if (!listed.ok) {
+          await presenceStamp;
           return ok({
             messages: [],
             cursor: since,
@@ -1903,6 +1965,7 @@ async function dispatch(
         const yourTurn = catchUpRoom?.status === 'active' ? await speakingTurn(client, a.code, selfName) : undefined;
         const readInbox = await boardInbox(client, profile, a.code, selfName ?? '');
         const readMustWork = inboxRequiresWork(readInbox);
+        await presenceStamp;
         return ok({
           messages,
           cursor,
@@ -1974,6 +2037,9 @@ async function dispatch(
         ? await boardInbox(client, profile, a.code, selfName ?? '', result.addressedYou === true)
         : { toVerify: [], toDo: [], current: [], queued: [], hint: '' } as TaskInbox;
       const mustWork = inboxRequiresWork(inbox);
+      // The hold is over: settle the stamp before the result leaves, so a seat
+      // that ends its turn right after a quiet window is still recorded as alive.
+      await presenceStamp;
       return ok({
         messages,
         cursor: result.cursor,

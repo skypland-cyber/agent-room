@@ -26,6 +26,7 @@ import { IsoStage, type StageMode } from './IsoStage.js';
 import { lightSpec, nextLightMode, type LightMode } from './isoLight.js';
 import { realityCounts, realityOf } from './isoReality.js';
 import { Badge, Button, Card, timeAgo } from '../ui.js';
+import { ConnectionBadge } from '../ConnectionBadge.js';
 import { t, useI18n, type MessageKey } from '../../../i18n/index.js';
 import { presenceLabel } from '../../../i18n/labels.js';
 import { warningText } from '../../../i18n/errors.js';
@@ -150,6 +151,14 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
             </span>
             <span className="flex items-center gap-1 rounded-full border border-dashed border-border bg-surface-soft px-2 py-0.5 text-[10px] font-semibold text-ink-soft">
               {tr('iso.legend.anim')}
+            </span>
+            <span className="flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              {tr('iso.legend.conn.external')}
+            </span>
+            <span className="flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-800">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-violet-500" />
+              {tr('iso.legend.conn.delegated')}
             </span>
           </div>
         ) : null}
@@ -309,6 +318,14 @@ function StaffList({ agents, selectedId, onSelect, planned }: {
                     </span>
                     <span className="shrink-0 text-[10px] text-ink-faint">{presenceLabel(agent.presence, agent.enabled)}</span>
                   </span>
+                  {/* Who is driving the seat, beside the state: an outside
+                      client in emerald, a seat 망고 is working in violet. The
+                      row is narrow, so this is the badge rather than a line. */}
+                  {agent.presence.connectionMode ? (
+                    <span className="mt-0.5 block">
+                      <ConnectionBadge mode={agent.presence.connectionMode} className="!px-1.5 !text-[9px]" />
+                    </span>
+                  ) : null}
                   <span className="mt-0.5 block truncate text-[10px] text-ink-soft">
                     {reality ? tr(reality.labelKey) : task ? task : tr('iso.staff.free')}
                   </span>

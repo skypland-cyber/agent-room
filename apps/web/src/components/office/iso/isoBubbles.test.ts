@@ -6,6 +6,7 @@
 // what makes the arithmetic checkable.
 import { describe, expect, it } from 'vitest';
 import {
+  drivenConnectionMode,
   fitBubbleLine,
   frameTextMetrics,
   frameTextPlan,
@@ -152,6 +153,66 @@ describe('words on a phone', () => {
         expect(overlap, `${first.id} covers ${second.id}`).toBe(false);
       }
     }
+  });
+
+  // Every online seat now carries a second chip (외부 / 대행), which makes the
+  // tag wider than the phone layout was sized for. The point of this test is
+  // that six seats in three pods still read as six tags, not one pile.
+  it('keeps six phone tags readable once each carries its connection chip', () => {
+    const metrics = frameTextMetrics(true);
+    const widthOf = (text: string) => text.length * 4.8;
+    const names = ['망고', 'Codex', 'Claude', 'Gemini', 'ChatGPT', 'Aside'];
+    const requests = names.map((name, index) => ({
+      id: `ag_${index}`,
+      x: 90 + (index % 3) * 22,
+      y: 120 + Math.floor(index / 3) * 14,
+      text: name,
+      modeChip: index % 2 === 0 ? '외부' : '대행',
+      width: tagWidth(widthOf, name, metrics, 'LIVE', index % 2 === 0 ? '외부' : '대행'),
+      height: metrics.tag.height,
+    }));
+    const tags = [...layoutAgentTags(requests, { mapWidth: 360, mapHeight: 320, edge: 3 }).values()];
+    expect(tags).toHaveLength(6);
+    for (const tag of tags) {
+      expect(tag.left).toBeGreaterThanOrEqual(0);
+      expect(tag.left + tag.width).toBeLessThanOrEqual(360);
+    }
+    for (let a = 0; a < tags.length; a += 1) {
+      for (let b = a + 1; b < tags.length; b += 1) {
+        const first = tags[a]!;
+        const second = tags[b]!;
+        const overlap = first.left < second.left + second.width
+          && second.left < first.left + first.width
+          && first.top < second.top + second.height
+          && second.top < first.top + first.height;
+        expect(overlap, `${first.id} covers ${second.id}`).toBe(false);
+      }
+    }
+  });
+
+  it('reserves room for the connection chip so the name never runs under it', () => {
+    const metrics = frameTextMetrics(false);
+    const plain = tagWidth(widthOf, 'Gemini', metrics, 'LIVE');
+    const chipped = tagWidth(widthOf, 'Gemini', metrics, 'LIVE', '대행');
+    expect(chipped).toBeGreaterThan(plain);
+    // The chip's own text plus its padding, not just one or two pixels.
+    expect(chipped - plain).toBeGreaterThanOrEqual(widthOf('대행') + 8);
+    expect(tagWidth(widthOf, 'Gemini', metrics, 'LIVE', '')).toBe(plain);
+  });
+
+  // The floor must never badge an empty desk: offline, disabled and paused
+  // seats keep their own look, even if a stale payload still carries a mode.
+  it('draws a connection chip only on a seat that is here', () => {
+    for (const status of ['idle', 'working', 'reviewing']) {
+      expect(drivenConnectionMode(status, true, 'delegated')).toBe('delegated');
+      expect(drivenConnectionMode(status, true, 'external')).toBe('external');
+    }
+    for (const status of ['offline', 'paused']) {
+      expect(drivenConnectionMode(status, true, 'delegated')).toBeUndefined();
+    }
+    expect(drivenConnectionMode('working', false, 'delegated')).toBeUndefined();
+    // No mode in the payload: nothing to draw, whatever the state says.
+    expect(drivenConnectionMode('working', true, undefined)).toBeUndefined();
   });
 
   it('gives the boss’s tag its own place before anyone else is placed', () => {

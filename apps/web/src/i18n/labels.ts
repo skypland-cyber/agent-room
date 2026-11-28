@@ -44,6 +44,31 @@ const LINK_KEYS: Record<string, MessageKey> = {
   offline: 'staff.link.offline',
 };
 
+/**
+ * How a seat is being driven, in the two lengths the floor needs.
+ *
+ * The name tag has room for a short chip; a card can carry the full words. Both
+ * come from the same table so the canvas and the panels can never disagree, and
+ * an unknown mode yields '' — the canvas and the cards then draw nothing rather
+ * than claiming one of the two.
+ */
+const CONNECTION_KEYS: Record<string, { short: MessageKey; full: MessageKey; hint: MessageKey }> = {
+  external: { short: 'conn.external', full: 'conn.external.full', hint: 'conn.external.hint' },
+  delegated: { short: 'conn.delegated', full: 'conn.delegated.full', hint: 'conn.delegated.hint' },
+};
+
+/** '외부' / '대행' — the chip on a name tag. */
+export function connectionModeChip(mode: string | undefined): string {
+  const key = mode ? CONNECTION_KEYS[mode] : undefined;
+  return key ? t(key.short) : '';
+}
+
+/** '외부 접속' / '망고 대행' — the badge on a card. */
+export function connectionModeLabel(mode: string | undefined): string {
+  const key = mode ? CONNECTION_KEYS[mode] : undefined;
+  return key ? t(key.full) : '';
+}
+
 /** 'pending_approval' → '승인 대기'. Unknown states pass through untouched. */
 export function taskStateLabel(state: string): string {
   const key = TASK_STATE_KEYS[state];

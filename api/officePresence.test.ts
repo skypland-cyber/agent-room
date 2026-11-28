@@ -176,4 +176,44 @@ describe('the presence a card produces', () => {
     const after = await call('overview', {}, cookie);
     expect(after.jsonBody.overview.openTasks.map((task: { title: string }) => task.title)).toContain('A second card');
   });
+
+  // The floor draws two badges the server must be able to justify: a client the
+  // person opened, or the assistant holding the seat for it. Both come off the
+  // same stamp as the heartbeat, and neither is guessed: a seat that went quiet
+  // stops claiming a mode, because "how it was driven" is not a fact about now.
+  it('names how an online seat is driven, and drops the label when the seat goes quiet', async () => {
+    const cookie = await signIn();
+    const seeded = await seedCard(cookie);
+    const now = Date.now();
+    const readAlpha = async () => {
+      const res = await call('overview', { freshness: 'fresh' }, cookie);
+      return res.jsonBody.overview.agents.find((agent: { name: string }) => agent.name === 'Alpha');
+    };
+
+    await seeded.hold({ state: 'in_progress', owner: 'Alpha', ownerClient: 'cc', title: '응답 캐시' });
+    // A client that says nothing is an outside client: the common case.
+    expect((await readAlpha()).presence).toMatchObject({ status: 'working', connectionMode: 'external' });
+
+    const { recordAgentHeartbeat } = await import('@agent-room/upstash-client');
+    const { createRemoteRoomClient } = await import('./_mcpRoomClient.js');
+    const client = createRemoteRoomClient(undefined);
+    await recordAgentHeartbeat(client.store, {
+      name: 'Alpha', roomCode: seeded.code, at: now + 1_000, throttleMs: 0, connectionMode: 'delegated',
+    });
+    expect((await readAlpha()).presence.connectionMode).toBe('delegated');
+
+    // A stamp written before the field existed keeps its seat online and simply
+    // says nothing about the mode, instead of defaulting to a claim.
+    fake.store.set('office:v1:heartbeat:alpha', JSON.stringify({ at: Date.now() }));
+    const legacy = await readAlpha();
+    expect(legacy.presence.status).not.toBe('offline');
+    expect(legacy.presence.connectionMode).toBeUndefined();
+
+    // Stale beats board work, and it also beats the mode: nothing is driving a
+    // seat nobody has heard from in twenty minutes.
+    fake.store.set('office:v1:heartbeat:alpha', JSON.stringify({ at: Date.now() - 20 * 60_000, connectionMode: 'delegated' }));
+    const gone = await readAlpha();
+    expect(gone.presence.status).toBe('offline');
+    expect(gone.presence.connectionMode).toBeUndefined();
+  });
 });

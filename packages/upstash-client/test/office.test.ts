@@ -92,6 +92,20 @@ describe('AI staff', () => {
     expect((await readHeartbeat(client, 'Qwen'))?.at).toBe(now + 31_000);
   });
 
+  it('records who is driving the seat, defaulting to an outside client', async () => {
+    // Nothing said: an ordinary MCP client, which is what almost every seat is.
+    await recordAgentHeartbeat(client, { name: 'Qwen', roomCode: 'AAA-111-222', at: now });
+    expect((await readHeartbeat(client, 'Qwen'))?.connectionMode).toBe('external');
+
+    // The boss's own runner says so, and the next stamp carries it too.
+    await recordAgentHeartbeat(client, { name: 'Qwen', at: now + 31_000, throttleMs: 0, connectionMode: 'delegated' });
+    expect((await readHeartbeat(client, 'Qwen'))?.connectionMode).toBe('delegated');
+
+    // A client that sends a nonsense value is read as an outside client, not stored as-is.
+    await recordAgentHeartbeat(client, { name: 'Qwen', at: now + 62_000, throttleMs: 0, connectionMode: 'sideways' as never });
+    expect((await readHeartbeat(client, 'Qwen'))?.connectionMode).toBe('external');
+  });
+
   it('does not register an unknown seat unless asked', async () => {
     await recordAgentHeartbeat(client, { name: 'Stranger', at: now });
     expect(await listAgents(client)).toHaveLength(0);

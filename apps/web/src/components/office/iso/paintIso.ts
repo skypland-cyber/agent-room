@@ -1239,6 +1239,12 @@ export interface AgentPaint {
   reality: RealityInfo;
   /** Walking right now: the leg stride and the bob belong to a moving person. */
   walking?: boolean;
+  /**
+   * Who is driving the seat: an outside client (`external`) or the boss's own
+   * assistant working it for the staff member (`delegated`). Undefined on a seat
+   * whose heartbeat predates the field, which draws no chip rather than a guess.
+   */
+  connectionMode?: string;
 }
 
 function characterHeight(pose: IsoAgentScene['pose']): number {
@@ -1489,13 +1495,32 @@ function drawCeo(ctx: Ctx, ceo: IsoCeoScene, timeMs: number, label: string): voi
   drawCharacter(ctx, { x: point.x, y: point.y - 1 }, paint, timeMs, 0, false);
 }
 
+/**
+ * The states in which a seat has a mode to show: it is here, and something is
+ * holding it. An offline or paused desk has no current answer, so it draws none.
+ */
+const DRIVEN_STATUSES = new Set(['idle', 'working', 'reviewing']);
+
+/**
+ * The connection chip a seat is allowed to show, if any.
+ *
+ * Kept as its own function so the rule is testable without a canvas: a seat that
+ * is offline, disabled or paused has no mode to draw, however stale the payload
+ * it arrived in. The server already leaves the field off in those states; this is
+ * the painter keeping the same promise with its own eyes.
+ */
+export function drivenConnectionMode(status: string, enabled: boolean, mode: string | undefined): string | undefined {
+  if (!mode || !enabled) return undefined;
+  return DRIVEN_STATUSES.has(status) ? mode : undefined;
+}
+
 export interface FrameOptions {
   view: IsoView;
   width: number;
   height: number;
   dpr: number;
   scenes: IsoAgentScene[];
-  agents: Array<{ id: string; name: string; status: string; enabled?: boolean }>;
+  agents: Array<{ id: string; name: string; status: string; enabled?: boolean; connectionMode?: string }>;
   selectedId?: string;
   hoveredId?: string;
   hoveredZone?: string | null;
@@ -1515,6 +1540,11 @@ export interface FrameOptions {
   movingIds?: string[];
   /** The tags' little chip: LIVE for a fact, 연출 for theatre. */
   chipLabels?: { live: string; anim: string };
+  /**
+   * The connection chips' words. The canvas is painted outside React, so the
+   * caller hands the translations in rather than the painter calling `t()`.
+   */
+  connectionChips?: { external: string; delegated: string };
 }
 
 export function paintFrame(ctx: Ctx, options: FrameOptions): void {
@@ -1535,6 +1565,14 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
       palette: paletteFor(agent.name, index),
       reality: realityOf({ status: agent.status, enabled: agent.enabled ?? true, needsBoss: scene.needsBoss, rest: scene.rest, zone: scene.zone }),
       walking: options.movingIds?.includes(scene.agentId) ?? false,
+      // The server only sends a mode for a seat that is here, and the painter
+      // holds the same line: an empty desk is drawn empty, whatever a stale
+      // payload still carries. A chip on an offline seat would be the one lie
+      // this floor cannot afford.
+      ...(() => {
+        const mode = drivenConnectionMode(agent.status, agent.enabled ?? true, agent.connectionMode);
+        return mode ? { connectionMode: mode } : {};
+      })(),
     });
   });
 
@@ -1634,13 +1672,19 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
     const point = toScreen(gridToIso(scene.spot.x, scene.spot.y));
     const text = shortName(paint.name);
     const chip = paint.reality.live ? (options.chipLabels?.live ?? 'LIVE') : (options.chipLabels?.anim ?? '~');
+    const modeChip = paint.connectionMode === 'external'
+      ? (options.connectionChips?.external ?? 'EXT')
+      : paint.connectionMode === 'delegated'
+        ? (options.connectionChips?.delegated ?? 'DEL')
+        : '';
     tagRequests.push({
       id: scene.agentId,
       x: point.x,
       y: point.y - characterHeight(scene.pose) * view.scale - 6,
       text,
       chip,
-      width: tagWidth(measureWith(ctx, metrics.tag.font), text, metrics, chip),
+      ...(modeChip ? { modeChip } : {}),
+      width: tagWidth(measureWith(ctx, metrics.tag.font), text, metrics, chip, modeChip),
       height: metrics.tag.height,
     });
   }
@@ -1653,7 +1697,7 @@ export function paintFrame(ctx: Ctx, options: FrameOptions): void {
     if (!tag) continue;
     const highlight = selectedId === scene.agentId || hoveredId === scene.agentId;
     if (scene.needsBoss) drawNeedsBoss(ctx, tag.left + tag.width + 8, tag.top + tag.height / 2, timeMs);
-    drawNameTag(ctx, tag, paint, highlight, metrics, options.chipLabels ?? { live: 'LIVE', anim: '~' });
+    drawNameTag(ctx, tag, paint, highlight, metrics, options.chipLabels ?? { live: 'LIVE', anim: '~' }, options.connectionChips ?? { external: 'EXT', delegated: 'DEL' });
     if (options.ceo?.greetId === scene.agentId) drawWave(ctx, tag.left - 9, tag.top + tag.height / 2, timeMs);
   }  const ownTag = tags.get('ceo');
   if (ownTag) drawOwnerTag(ctx, ownTag, options.ownerLabel ?? 'CEO', metrics, timeMs);
@@ -1718,7 +1762,15 @@ function drawNeedsBoss(ctx: Ctx, x: number, y: number, timeMs: number): void {
   ctx.restore();
 }
 
-function drawNameTag(ctx: Ctx, tag: TagPlacement, paint: AgentPaint, highlight: boolean, metrics: FrameTextMetrics, chips: { live: string; anim: string }): void {
+function drawNameTag(
+  ctx: Ctx,
+  tag: TagPlacement,
+  paint: AgentPaint,
+  highlight: boolean,
+  metrics: FrameTextMetrics,
+  chips: { live: string; anim: string },
+  connection: { external: string; delegated: string },
+): void {
   ctx.save();
   const row = metrics.tag;
   const live = paint.reality.live;
@@ -1731,7 +1783,13 @@ function drawNameTag(ctx: Ctx, tag: TagPlacement, paint: AgentPaint, highlight: 
   ctx.fillStyle = highlight ? 'rgba(15,32,47,0.96)' : live ? 'rgba(9,16,25,0.9)' : 'rgba(9,16,25,0.62)';
   ctx.fill();
   if (!live) ctx.setLineDash([2.5, 2]);
-  ctx.strokeStyle = highlight ? 'rgba(125,211,252,0.95)' : live ? 'rgba(160,182,206,0.5)' : 'rgba(148,163,184,0.62)';
+  // A delegated seat keeps a violet edge while it is live: the outline is the
+  // one part of the tag that survives being read from across the room.
+  ctx.strokeStyle = highlight
+    ? 'rgba(125,211,252,0.95)'
+    : paint.connectionMode === 'delegated'
+      ? 'rgba(167,139,250,0.75)'
+      : live ? 'rgba(160,182,206,0.5)' : 'rgba(148,163,184,0.62)';
   ctx.lineWidth = 1;
   ctx.stroke();
   ctx.setLineDash([]);
@@ -1758,6 +1816,31 @@ function drawNameTag(ctx: Ctx, tag: TagPlacement, paint: AgentPaint, highlight: 
   ctx.fillStyle = live ? '#9fe0ff' : '#b6c6d5';
   ctx.textAlign = 'center';
   ctx.fillText(chipText, chipX + chipW / 2, chipY + chipH / 2 + 0.3);
+
+  // The connection chip, just inside the status chip: emerald for a client the
+  // boss opened, violet for a seat Mango is driving for that staff member. Two
+  // words the boss reads at a glance, in the two colours nothing else on the
+  // floor uses. A seat whose mode is unknown draws neither.
+  const modeChip = paint.connectionMode === 'delegated'
+    ? connection.delegated
+    : paint.connectionMode === 'external'
+      ? connection.external
+      : '';
+  if (modeChip) {
+    const delegated = paint.connectionMode === 'delegated';
+    const modeW = Math.round(ctx.measureText(modeChip).width) + 8;
+    const modeH = chipH;
+    const modeX = chipX - modeW - 2;
+    pill(ctx, modeX, chipY, modeW, modeH, modeH / 2);
+    ctx.fillStyle = delegated ? 'rgba(167,139,250,0.32)' : 'rgba(16,185,129,0.26)';
+    ctx.fill();
+    ctx.strokeStyle = delegated ? 'rgba(196,181,253,0.6)' : 'rgba(110,231,183,0.55)';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+    ctx.fillStyle = delegated ? '#ddd0ff' : '#a7f3d0';
+    ctx.textAlign = 'center';
+    ctx.fillText(modeChip, modeX + modeW / 2, chipY + modeH / 2 + 0.3);
+  }
   ctx.restore();
 }
 
@@ -2014,6 +2097,8 @@ export interface TagRequest {
   text: string;
   /** The small chip after the name: LIVE, or 연출. */
   chip?: string;
+  /** The connection chip before it: 외부/EXT or 대행/DEL, when the seat says. */
+  modeChip?: string;
   width: number;
   height: number;
 }
@@ -2027,9 +2112,10 @@ export interface TagPlacement {
 }
 
 /** The width a tag needs, from the metrics, the text and its chip. */
-export function tagWidth(widthOf: (text: string) => number, text: string, metrics: FrameTextMetrics, chip = ''): number {
+export function tagWidth(widthOf: (text: string) => number, text: string, metrics: FrameTextMetrics, chip = '', modeChip = ''): number {
   const chipWidth = chip ? Math.round(widthOf(chip)) + 8 : 0;
-  return Math.max(24, Math.round(widthOf(text) + metrics.tag.padX * 2 + chipWidth));
+  const modeWidth = modeChip ? Math.round(widthOf(modeChip)) + 10 : 0;
+  return Math.max(24, Math.round(widthOf(text) + metrics.tag.padX * 2 + chipWidth + modeWidth));
 }
 
 /** A name that fits a tag: eleven characters and an ellipsis is plenty. */
