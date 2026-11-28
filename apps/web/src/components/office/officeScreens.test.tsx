@@ -310,6 +310,12 @@ describe('office screens render', () => {
 
   it('renders the 3D diorama as a list a keyboard and a phone can both use', () => {
     const html = renderToStaticMarkup(<OfficeDiorama agents={agents} generatedAt={now} />);
+    // The drawn office is the stage, and every staff member is a tag on it.
+    expect(html).toContain('office-diorama-bg.png');
+    expect(html).toContain('office-diorama-bg.webp');
+    expect(html).toContain('aspect-[3/2]');
+    expect(html).toContain('작업 중 1'); // the live counter over the artwork
+    expect(html).toContain('오프라인 1');
     // Every agent is a button that names itself and its state for a screen reader.
     expect(html).toContain('Qwen, 작업 중 — 상세 보기');
     expect(html).toContain('Codex, 오프라인 — 상세 보기');

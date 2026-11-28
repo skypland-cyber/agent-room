@@ -164,56 +164,98 @@ export function Office() {
   }, [loadOverview]);
 
   const header = (
-    <header className="sticky top-0 z-20 border-b border-border bg-white/95 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
-        <div className="flex items-center gap-3">
-          <Link to="/" className="hover:opacity-85" aria-label={t('office.home.aria')}>
-            <AgentRoomLogo markClassName="h-7 w-7" wordmarkClassName="text-lg" />
-          </Link>
-          <span className="hidden h-5 w-px bg-border sm:block" />
-          <div className="hidden sm:block">
-            <p className="text-sm font-semibold tracking-tight text-ink">{t('office.brand.title')}</p>
-            <p className="text-[11px] text-ink-faint">{t('office.brand.subtitle')}</p>
+    <header className="sticky top-0 z-30 border-b border-border bg-white/95 backdrop-blur">
+      {/*
+        The header is two rows on a phone and one on a desk. It used to be a fixed
+        64px row whose buttons wrapped into three lines and spilled out of the
+        header's own box — which is what painted over the view switch below it.
+        Now the box only ever grows: every label is nowrap, the logo never wraps,
+        and a narrow screen gets a second row for the actions that do not fit.
+      */}
+      <div className="mx-auto max-w-7xl px-3 pb-2 pt-2 sm:px-6 sm:py-0">
+        <div className="flex items-center gap-2 sm:h-16 sm:gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <Link to="/" className="shrink-0 hover:opacity-85" aria-label={t('office.home.aria')}>
+              <AgentRoomLogo markClassName="h-6 w-6 sm:h-7 sm:w-7" wordmarkClassName="whitespace-nowrap text-base sm:text-lg" />
+            </Link>
+            <span className="hidden h-5 w-px bg-border sm:block" />
+            <div className="hidden min-w-0 sm:block">
+              <p className="whitespace-nowrap text-sm font-semibold tracking-tight text-ink">{t('office.brand.title')}</p>
+              <p className="whitespace-nowrap text-[11px] text-ink-faint">{t('office.brand.subtitle')}</p>
+            </div>
+          </div>
+
+          {/* Desk: one row, in the order the day is read. */}
+          <div className="ml-auto hidden shrink-0 items-center gap-2 sm:flex">
+            {overview ? (
+              <>
+                <UsageGauge overview={overview} className="hidden sm:flex" />
+                <span className="hidden whitespace-nowrap text-[11px] text-ink-faint lg:inline">
+                  {lastRefresh ? t('office.header.updated', { time: timeAgo(lastRefresh) }) : ''}
+                </span>
+                <Button variant="quiet" className="whitespace-nowrap" onClick={() => void refreshNow()} disabled={busy}
+                  title={t('office.header.refreshHint')}>
+                  {busy ? t('office.header.refreshing') : `↻ ${t('office.header.refresh')}`}
+                </Button>
+              </>
+            ) : null}
+            <LanguageToggle />
+            <Link to="/new" className="shrink-0"><Button variant="ghost" className="whitespace-nowrap">{t('office.header.openRoom')}</Button></Link>
+            {status?.authenticated ? <Button variant="quiet" className="whitespace-nowrap" onClick={() => void signOut()}>{t('office.header.signOut')}</Button> : null}
+          </div>
+
+          {/* Phone: only the two controls used while watching stay in the top row. */}
+          <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:hidden">
+            {overview ? (
+              <button
+                type="button"
+                onClick={() => void refreshNow()}
+                disabled={busy}
+                aria-label={t('office.header.refresh')}
+                title={t('office.header.refreshHint')}
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-border bg-white text-sm font-semibold text-ink-muted transition hover:text-ink disabled:opacity-50"
+              >
+                <span className={busy ? 'inline-block animate-spin' : 'inline-block'} aria-hidden="true">↻</span>
+              </button>
+            ) : null}
+            <LanguageToggle className="shrink-0" />
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          {overview ? (
-            <>
-              <UsageGauge overview={overview} className="hidden sm:flex" />
-              <span className="hidden text-[11px] text-ink-faint md:inline">
-                {lastRefresh ? t('office.header.updated', { time: timeAgo(lastRefresh) }) : ''}
-              </span>
-              <Button variant="quiet" onClick={() => void refreshNow()} disabled={busy}
-                title={t('office.header.refreshHint')}>
-                {busy ? t('office.header.refreshing') : `↻ ${t('office.header.refresh')}`}
-              </Button>
-            </>
+
+        {/* Phone: the actions that leave the page sit on their own row, never squeezed. */}
+        <div className="mt-2 flex items-center gap-1.5 sm:hidden">
+          <Link to="/new" className="min-w-0 flex-1">
+            <Button variant="ghost" className="!w-full whitespace-nowrap">{t('office.header.openRoom')}</Button>
+          </Link>
+          {status?.authenticated ? (
+            <Button variant="quiet" className="shrink-0 whitespace-nowrap" onClick={() => void signOut()}>{t('office.header.signOut')}</Button>
           ) : null}
-          <LanguageToggle />
-          <Link to="/new"><Button variant="ghost">{t('office.header.openRoom')}</Button></Link>
-          {status?.authenticated ? <Button variant="quiet" onClick={() => void signOut()}>{t('office.header.signOut')}</Button> : null}
         </div>
       </div>
       {status?.authenticated && overview ? (
-        <div className="mx-auto flex max-w-7xl gap-1 overflow-x-auto px-2 sm:px-6">
-          {TABS.map(item => {
-            const badge = item.badge?.(overview) ?? 0;
-            return (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => setTab(item.key)}
-                className={`relative shrink-0 border-b-2 px-3 py-2.5 text-xs font-semibold transition ${
-                  tab === item.key ? 'border-ink text-ink' : 'border-transparent text-ink-soft hover:text-ink'
-                }`}
-              >
-                {t(item.labelKey)}
-                {badge > 0 ? (
-                  <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800">{badge}</span>
-                ) : null}
-              </button>
-            );
-          })}
+        <div className="relative">
+          <div className="mx-auto flex max-w-7xl gap-1 overflow-x-auto px-2 [scrollbar-width:none] sm:px-6 [&::-webkit-scrollbar]:hidden">
+            {TABS.map(item => {
+              const badge = item.badge?.(overview) ?? 0;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => setTab(item.key)}
+                  className={`relative shrink-0 whitespace-nowrap border-b-2 px-3 py-2.5 text-xs font-semibold transition ${
+                    tab === item.key ? 'border-ink text-ink' : 'border-transparent text-ink-soft hover:text-ink'
+                  }`}
+                >
+                  {t(item.labelKey)}
+                  {badge > 0 ? (
+                    <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800">{badge}</span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+          {/* A phone scrolls the tabs sideways; the fade says there is more to the right. */}
+          <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-white to-transparent sm:hidden" />
         </div>
       ) : null}
     </header>
