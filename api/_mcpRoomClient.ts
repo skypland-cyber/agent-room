@@ -1,4 +1,4 @@
-import { invalidateOfficeOverview } from './_office.js';
+import { invalidateOfficeOverview, syncRoomAutoClose } from './_office.js';
 import { findSeat } from './_roomAccess.js';
 import { generateCode } from '@agent-room/shared';
 import type { Message, Participant, Room, RoomReport } from '@agent-room/shared';
@@ -163,6 +163,11 @@ async function readBoard(store: UpstashClient, code: string) {
 async function afterTaskWrite<T>(store: UpstashClient, code: string, result: T): Promise<T> {
   await publishBoardNotifications(store, code);
   await invalidateOfficeOverview(store);
+  // A board write is the one moment the room's completion state can change —
+  // a new card, a card moved back out of done, the last done card. So this is
+  // where the auto-close plan is armed (every task done), moved or dropped,
+  // without a separate sweep having to walk rooms nobody is touching.
+  await syncRoomAutoClose(store, code).catch(() => undefined);
   return result;
 }
 
@@ -525,10 +530,16 @@ export async function appendMessage(
   //
   // Best-effort and never fatal: a subscriber's broken endpoint must not turn
   // a delivered message into a failed room_send.
+  //
+  // The same read answers the auto-close question: a message is activity, so a
+  // room waiting out its grace period has its deadline moved out instead of
+  // running out on a conversation that just resumed. Only an armed room costs
+  // anything here — every other room is the read the webhook fan-out needed.
   try {
     const room = await storeGetRoom(client.store, code);
     const cursor = (result as { cursor?: number } | null)?.cursor ?? null;
     await dispatchRoomWebhooks(client.store, room, message, cursor);
+    if (room.autoClose) await syncRoomAutoClose(client.store, code).catch(() => undefined);
   } catch { /* delivery is not the sender's problem */ }
   return result;
 }
@@ -572,6 +583,9 @@ export async function endRoom(
     const { captureRoomArchive } = await import('./_office.js');
     await captureRoomArchive(client.store, code, { name: room.createdBy || 'host', kind: 'host' });
   } catch { /* the room ended; the dashboard can archive it later */ }
+  // Ending by hand cancels any auto-close plan the room was carrying: the
+  // deadline was for a room that still had to be closed.
+  await syncRoomAutoClose(client.store, code).catch(() => undefined);
   return room;
 }
 

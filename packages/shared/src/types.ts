@@ -216,6 +216,21 @@ export interface ReplyModeConfig {
   leadGraceMs?: number;
 }
 
+// A plan to archive and close a room because its board is finished. Written by
+// `decideRoomAutoClose` (roomAutoClose.ts) and applied by the office layer; it
+// lives on the room document so every reader — dashboard, MCP, cron — sees the
+// same deadline without a second store.
+export interface RoomAutoClose {
+  armedAt: number;        // when the plan was first written
+  dueAt: number;          // epoch ms — the room closes at or after this
+  graceMinutes: number;   // the grace this plan was armed with
+  taskCount: number;      // cards on the board when the plan was written (never 0)
+  messageCount: number;   // transcript counter watermark: more messages = activity
+  boardVersion?: number;  // board version at arm time, kept for the record
+  deferred?: number;      // how many times new activity pushed the deadline out
+  lastDeferAt?: number;   // epoch ms of the last deferral
+}
+
 export interface Room {
   code: string;
   topic: string;
@@ -269,6 +284,12 @@ export interface Room {
   projectPromptVersion?: number;
   // Epoch ms of the last successful setProjectPrompt write (set or clear).
   projectPromptUpdatedAt?: number;
+  // Set while the room waits out the grace period that follows a fully done
+  // board (see roomAutoClose.ts). Absent on a room that is not scheduled,
+  // including every room stored before this field existed.
+  autoClose?: RoomAutoClose;
+  // Epoch ms when the room was closed by that rule rather than by a person.
+  autoClosedAt?: number;
 }
 
 export type MessageKind = 'msg' | 'sys';

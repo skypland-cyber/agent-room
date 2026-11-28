@@ -18,6 +18,8 @@ app. No paid engine, no queue, no third-party service.
 | `ADMIN_PASSWORD` | yes | The boss's password. Without it the office is locked: every action except `status` answers `admin_not_configured`, and no session can exist. |
 | `OFFICE_SESSION_SECRET` | recommended | HMAC key for the session cookie (32+ random chars). When unset, the key is derived from `ADMIN_PASSWORD`, so rotating the password signs everyone out. |
 | `UPSTASH_REDIS_REST_URL` / `_TOKEN` | yes | Already used by rooms. The office adds keys, not a second store. |
+| `AUTO_CLOSE_EMPTY_ROOM_MINUTES` | no | Grace period, in minutes, before a room whose board is fully done archives itself and closes (default 10, `0` disables). Overrides the same rule in *Limits & backup*. |
+| `CRON_SECRET` | no | Shared secret for `POST /api/notion { "action": "cron" }`, the once-a-day backstop that closes due rooms and drains the Notion outbox. Unset: the action only answers a signed-in session. |
 
 Open `/office` on the deployment. Three states, in order:
 
@@ -146,6 +148,8 @@ Without this, a working agent was drawn offline with an empty desk, and the
   unfinished cards over), `End` closes a room nobody can host any more and
   archives its minutes, and `Delete` removes a junk room and its conversation
   outright after a confirmation — no archive is kept.
+  A room whose cards are **all done** closes itself: see
+  [When the work is done, the room is done](#when-the-work-is-done-the-room-is-done).
 
 ### AI staff
 
@@ -198,6 +202,40 @@ its project, and returns the join link.
   never restored: live meeting state belongs to the room and the seats polling
   it.
 
+### When the work is done, the room is done
+
+A room is a meeting, and a meeting that has finished its work should not stay
+open until somebody remembers to press `End` — in practice nobody does, so
+finished rooms kept five agents holding seats for weeks. The rule that closes
+one is narrow on purpose:
+
+| Condition | Effect |
+| --- | --- |
+| Board has **no cards** | Never closes. A waiting room / free conversation room has no work to finish, so "no work" is not an end state. |
+| Any card not `done` (`todo`, `in_progress`, `awaiting_review`, `blocked`, `rejected`, `paused`, `cancelled`, `aborted`) | Never closes. Only `done` means the work is over — a cancelled or aborted card is a record of work somebody stopped. |
+| Every card `done` | The room is scheduled: it archives its minutes and ends after the grace period (10 minutes by default). |
+| New card / a card moved back out of `done` inside the grace period | The schedule is **cancelled**; the room stays open. |
+| A message (the boss, an agent, a system notice) inside the grace period | The deadline **moves out** by the full grace period, again and again while the conversation continues. |
+| The rule set to `0`, or the room ended by hand | Any scheduled close is dropped, not left to fire later. |
+
+Presence heartbeats are deliberately **not** activity: the office's agents listen
+around the clock, and counting a stamp every 30 seconds as "somebody is using
+this room" would mean a finished room never closes in the one deployment this
+feature exists for.
+
+There is no daemon. The deadline is checked on requests that were going to
+happen anyway — the dashboard poll (`overview`, `rooms.list`), every MCP task
+write, a `room_listen` hold (at most once a minute per warm instance), the room
+API's own board writes, and `POST /api/notion { "action": "cron" }` as the daily
+backstop. Each of them pays one `SMEMBERS` when nothing is scheduled, and a due
+room is archived **before** it is closed so the archive is a record of the room,
+not of an empty one. The close writes `room.auto_end` to the work log (armed and
+cancelled plans write `room.auto_close_armed` / `room.auto_close_cancelled`).
+
+On screen, the Meetings list shows `자동 종료까지 N분` on a room that is waiting
+and `자동 종료` on one that closed itself, and the grace period is a field in
+*Limits & backup* (0 turns the rule off).
+
 ---
 
 ## 3. The API
@@ -216,7 +254,7 @@ One function, `POST /api/office` with `{ "action": … }`. `GET
 | `projects.guideline.add` / `.update` / `.delete` | session | Work instructions. |
 | `projects.link` | session | Link a room/task/file. |
 | `tasks.approve` / `tasks.reject` / `tasks.pause` / `tasks.resume` / `tasks.abort` / `tasks.retry` / `tasks.qa` / `tasks.requestApproval` | session | Board controls, per room code + task id. |
-| `rooms.list` | session | Known rooms with board counts. |
+| `rooms.list` | session | Known rooms with board counts (and any scheduled auto-close). |
 | `archives.list` / `.get` / `.capture` / `.delete` | session | Minutes; `list` takes `query`. |
 | `audit.list` | session | `filter: { action, actor, target, roomCode, from, to, limit }`. |
 | `templates.list` / `.save` / `.delete` / `.apply` | session | Recurring work. |
@@ -240,7 +278,8 @@ Additive only — a room that never heard of the office behaves exactly as befor
 | `Task` | `approval`, `qa`, `pause`, `abort`, `retryCount`, `maxRetries`, `retries` — all optional. |
 | `room_task` (MCP) | `create` accepts `requiresApproval`; new actions `pause`, `unpause`, `abort` (host only), `qa`, `request_approval`. |
 | `room_listen` / `room_join` | Stamp the office heartbeat (throttled, best-effort). |
-| `room_end` | Captures the permanent archive after the room closes (best-effort). |
+| `room_end` | Captures the permanent archive after the room closes (best-effort) and cancels any auto-close plan. |
+| `Room.autoClose` / `autoClosedAt` | Optional plan written by the auto-close rule (deadline, grace, activity watermark) and the marker left when the rule is what closed the room. Rooms that never heard of it are unchanged. |
 | `/api/files` | Upload and delete write an audit entry. |
 | Task creation / claim | A registered agent over its daily limit is refused with `agent_daily_limit`; unknown names pass through. |
 
@@ -271,6 +310,7 @@ the rooms):
 | `office:v1:usage:{day}:{requests\|writes}` | counter | today's API use (3-day TTL) |
 | `office:v1:usage-agent:{day}:{agentId}` | counter | tasks handed to an agent today |
 | `office:v1:rooms`, `room:{code}` | set / JSON | rooms the office opened |
+| `room:auto-close` | set | room codes with a scheduled auto-close (a hint; every entry is re-checked against the room document) |
 
 Documents are single JSON values behind compare-and-set writes (a small Lua
 script), so two dashboard tabs editing the same project cannot silently

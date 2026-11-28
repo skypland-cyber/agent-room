@@ -3,7 +3,7 @@ import { isValidCode, type Message } from '@agent-room/shared';
 import * as storage from '@agent-room/upstash-client';
 import { assertHostFor, createRemoteRoomClient, publishBoardNotifications, RemoteRoomApiError } from './_mcpRoomClient.js';
 import { digest, findSeat, withinRateLimit } from './_roomAccess.js';
-import { captureRoomArchive, invalidateOfficeOverview } from './_office.js';
+import { captureRoomArchive, invalidateOfficeOverview, syncRoomAutoClose } from './_office.js';
 
 const string = (value: unknown) => typeof value === 'string' ? value : '';
 /**
@@ -13,6 +13,18 @@ const string = (value: unknown) => typeof value === 'string' ? value : '';
  * cheap half of the API and must not cost a DEL.
  */
 const boardWriteOperations = new Set([
+  'createTask', 'updateTask', 'reassignTaskRoles', 'cancelTask', 'verifyTask',
+  'resumeTask', 'blockTask', 'endRoom', 'reactivateRoom',
+]);
+
+/**
+ * Board writes after which the auto-close plan has to be recomputed.
+ *
+ * `endRoom` and `reactivateRoom` are in here too: ending a room must drop a
+ * plan that would otherwise fire on a room that is already over, and
+ * reactivating one has to arm it again if its board is still fully done.
+ */
+const autoCloseOperations = new Set([
   'createTask', 'updateTask', 'reassignTaskRoles', 'cancelTask', 'verifyTask',
   'resumeTask', 'blockTask', 'endRoom', 'reactivateRoom',
 ]);
@@ -86,11 +98,15 @@ async function run(body: Record<string, unknown>, store: storage.UpstashClient) 
         throw new RemoteRoomApiError('Invalid message.', 400, 'bad_request');
       }
       const { name, role, color, initials } = seat;
-      return storage.appendMessage(store, code, {
+      const appended = await storage.appendMessage(store, code, {
         id: Number.isSafeInteger(input.id) ? input.id! : Date.now(),
         name, role, color, initials, client: 'web', type: 'msg', text: input.text,
         time: Date.now(), attachments: Array.isArray(input.attachments) ? input.attachments.slice(0, 6) : undefined,
       });
+      // Typing in a room whose work is done is the clearest sign it is not
+      // finished after all: the auto-close deadline moves out on the spot.
+      if (room.autoClose) await syncRoomAutoClose(store, code).catch(() => undefined);
+      return appended;
     }
     case 'appendSystemMessage':
       return storage.appendSystemMessage(store, code, args[0] as Message);
@@ -181,6 +197,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     const result = await run(body, store);
     if (boardWriteOperations.has(String(body.action))) await invalidateOfficeOverview(store);
+    // The room API is the human half of the board (the room UI's verifier, the
+    // host's own task edits), so the auto-close plan is recomputed here too —
+    // otherwise a room finished from the room screen would never close, and a
+    // room reopened there would close while somebody is still working.
+    if (autoCloseOperations.has(String(body.action))) {
+      await syncRoomAutoClose(store, String(body.code)).catch(() => undefined);
+    }
     return res.status(200).send(JSON.stringify({ result }, (key, value) =>
       ['hostKeyHash', 'seatKeyHash', 'ownerEmail', 'ownerId'].includes(key) ? undefined : value));
   } catch (error) {

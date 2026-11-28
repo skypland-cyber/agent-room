@@ -36,21 +36,33 @@ import {
   agentCapacity,
   officeAgentUsageKey,
   registerOfficeRoom,
+  clearRoomAutoClose,
+  closeRoomByAutoClose,
+  getArmedRoom,
+  getMessageTotalCount,
+  listArmedAutoCloseRooms,
+  unindexRoomAutoClose,
+  writeRoomAutoClose,
 } from '@agent-room/upstash-client';
 import type { Room, Task, TaskBoard } from '@agent-room/shared';
 import { createBlobStore } from './_blobStore.js';
 import {
+  AUTO_CLOSE_SWEEP_LIMIT,
   AVATAR_PALETTE,
   OFFICE_DEFAULT_SETTINGS,
   ROOM_TTL_SECONDS,
   agentPresence,
+  autoCloseMinutesFromEnv,
+  decideRoomAutoClose,
   filterAudit,
   handoffUrgency,
   kstDay,
+  normalizeAutoCloseMinutes,
   officeBaseName,
   redactSecretText,
   usageLevel,
 } from '@agent-room/shared';
+import type { AutoCloseDecision, OfficeSettings } from '@agent-room/shared';
 import type {
   AgentTaskActivity,
   OfficeAgent,
@@ -447,6 +459,7 @@ export async function buildOverview(store: UpstashClient, options: OverviewOptio
       ...(handoffUrgency({ status: room.status, daysLeft }) === 'due' ? { handoffDue: true } : {}),
       ...(links[code]?.successorRoomCode ? { successorRoomCode: links[code]!.successorRoomCode } : {}),
       ...(links[code]?.predecessorRoomCode ? { predecessorRoomCode: links[code]!.predecessorRoomCode } : {}),
+      ...autoCloseFields(room),
     });
   }
 
@@ -740,7 +753,246 @@ export async function roomSummaries(store: UpstashClient, now: number = Date.now
       ...(handoffUrgency({ status: room.status, daysLeft }) === 'due' ? { handoffDue: true } : {}),
       ...(links[code]?.successorRoomCode ? { successorRoomCode: links[code]!.successorRoomCode } : {}),
       ...(links[code]?.predecessorRoomCode ? { predecessorRoomCode: links[code]!.predecessorRoomCode } : {}),
+      ...autoCloseFields(room),
     });
   }
   return out.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+// ─── Closing a room whose work is done ────────────────────────────────────
+//
+// A finished room used to stay open until somebody pressed End, which in
+// practice meant forever: the office list filled with ended-up meetings that
+// still had agents holding seats in them. The rule that closes one is in
+// @agent-room/shared (roomAutoClose.ts) and is deliberately narrow — at least
+// one card, every card `done`, a grace period, and anything that happens inside
+// the grace period postpones or cancels the close. This section is the part
+// that needs Redis: reading what the room looks like now, writing the plan,
+// and doing the archive-and-end when the deadline arrives.
+//
+// There is no daemon. Vercel's free tier has no always-on process, so the check
+// rides on requests that were going to happen anyway — a dashboard poll, an MCP
+// task write, a listen hold, the notion cron — and each of those pays one
+// SMEMBERS when nothing is scheduled.
+
+/** The audit actor every automatic close writes under. */
+const AUTO_CLOSE_ACTOR = { name: 'auto-close', kind: 'system' as const };
+
+/**
+ * The grace period in force, in minutes. `0` disables the rule.
+ *
+ * `AUTO_CLOSE_EMPTY_ROOM_MINUTES` wins over the office setting when it is set,
+ * because a deployment that pinned the number in an environment variable meant
+ * it: a dashboard edit must not silently override an operator's choice. An
+ * explicit `0` in either place is "off", not "missing".
+ */
+export function autoCloseGraceMinutes(settings: OfficeSettings): number {
+  const fromEnv = autoCloseMinutesFromEnv(process.env.AUTO_CLOSE_EMPTY_ROOM_MINUTES);
+  if (fromEnv !== null) return fromEnv;
+  return normalizeAutoCloseMinutes(settings.autoCloseEmptyRoomMinutes);
+}
+
+/**
+ * Messages ever appended to the room — the activity watermark.
+ *
+ * The counter is written in the same pipeline as the message itself, so it
+ * cannot drift from the list. A room from before the counter existed (or one
+ * whose key was lost) falls back to the list length: one more command, and only
+ * on that path.
+ */
+async function roomMessageCount(store: UpstashClient, code: string): Promise<number> {
+  const total = await getMessageTotalCount(store, code).catch(() => null);
+  if (typeof total === 'number') return total;
+  const length = await store.command<number | null>(['LLEN', `room-msgs:${code}`]).catch(() => 0);
+  return Number(length) || 0;
+}
+
+export type RoomAutoCloseState = 'none' | 'kept' | 'armed' | 'deferred' | 'cleared' | 'closed';
+
+export interface RoomAutoCloseResult {
+  code: string;
+  state: RoomAutoCloseState;
+  /** Epoch ms the room will (or would) close; absent when nothing is scheduled. */
+  autoCloseAt?: number;
+  /** Why a plan was cleared — the same words the audit line carries. */
+  reason?: string;
+  /** Archive id, when this call is the one that closed the room. */
+  archiveId?: string;
+}
+
+/**
+ * Carry out one decision.
+ *
+ * `end` archives before it closes: a room that closes first and archives second
+ * leaves a window where the archive sees an ended room through the room layer's
+ * own filters. Archiving an active room is already supported (that is what the
+ * dashboard's "archive now" does), so the order is archive → close.
+ */
+async function applyAutoCloseDecision(
+  store: UpstashClient,
+  code: string,
+  decision: AutoCloseDecision,
+  now: number,
+): Promise<RoomAutoCloseResult> {
+  switch (decision.kind) {
+    case 'none':
+      return { code, state: 'none' };
+    case 'keep':
+      return { code, state: 'kept', autoCloseAt: decision.plan.dueAt };
+    case 'arm': {
+      const written = await writeRoomAutoClose(store, code, decision.plan).catch(() => null);
+      if (!written) return { code, state: 'none' };
+      await invalidateOfficeOverview(store, now);
+      await audit(store, AUTO_CLOSE_ACTOR, 'room.auto_close_armed', {
+        roomCode: code,
+        detail: `${decision.plan.taskCount} task${decision.plan.taskCount === 1 ? '' : 's'} done · closes in ${decision.plan.graceMinutes} min unless something happens`,
+        at: now,
+      });
+      return { code, state: 'armed', autoCloseAt: decision.plan.dueAt };
+    }
+    case 'defer': {
+      const written = await writeRoomAutoClose(store, code, decision.plan).catch(() => null);
+      if (!written) return { code, state: 'none' };
+      await invalidateOfficeOverview(store, now);
+      // No audit line: "a message arrived" is not an event the boss needs to
+      // read later, and a room where agents chat would bury the log in them.
+      return { code, state: 'deferred', autoCloseAt: decision.plan.dueAt, reason: decision.reason };
+    }
+    case 'clear': {
+      await clearRoomAutoClose(store, code).catch(() => false);
+      await invalidateOfficeOverview(store, now);
+      await audit(store, AUTO_CLOSE_ACTOR, 'room.auto_close_cancelled', {
+        roomCode: code,
+        detail: decision.reason,
+        at: now,
+      });
+      return { code, state: 'cleared', reason: decision.reason };
+    }
+    case 'end': {
+      const archive = await captureRoomArchive(store, code, AUTO_CLOSE_ACTOR, now).catch(() => null);
+      const closed = await closeRoomByAutoClose(store, code, now).catch(() => null);
+      if (!closed || closed.autoClosedAt !== now) {
+        // The room was ended (or deleted) between the read and the write. The
+        // archive above still belongs to it; the plan does not.
+        await clearRoomAutoClose(store, code).catch(() => false);
+        return { code, state: 'cleared', reason: 'room_ended' };
+      }
+      await invalidateOfficeOverview(store, now);
+      await audit(store, AUTO_CLOSE_ACTOR, 'room.auto_end', {
+        roomCode: code,
+        ...(archive ? { target: archive.id } : {}),
+        detail: `every task done · ${archive ? `${archive.messageCount} messages archived` : 'archive unavailable'}`,
+        at: now,
+      });
+      return { code, state: 'closed', ...(archive ? { archiveId: archive.id } : {}) };
+    }
+  }
+}
+
+/**
+ * Re-read one room and apply the rule to it.
+ *
+ * Every trigger calls this, and it never trusts what the caller thought the
+ * room looked like: the board and the message counter are read here, and the
+ * decision is made from those. That is what keeps a stale read in the dashboard
+ * from closing a room whose work came back.
+ */
+export async function syncRoomAutoClose(
+  store: UpstashClient,
+  code: string,
+  options: { now?: number; settings?: OfficeSettings } = {},
+): Promise<RoomAutoCloseResult> {
+  const now = options.now ?? Date.now();
+  const settings = options.settings ?? await getOfficeSettings(store).catch(() => OFFICE_DEFAULT_SETTINGS);
+  const graceMinutes = autoCloseGraceMinutes(settings);
+  const room = await getArmedRoom(store, code);
+  if (!room) {
+    // Expired or deleted: no plan to keep, and the index entry is now a lie.
+    await unindexRoomAutoClose(store, code).catch(() => undefined);
+    return { code, state: 'none' };
+  }
+  // The cheap exit: a room that is not scheduled, with the rule switched off,
+  // costs nothing beyond the room read the caller already had to do anyway.
+  if (!room.autoClose && graceMinutes <= 0) return { code, state: 'none' };
+  const board = await getTaskBoard(store, code).catch(() => null);
+  if (!board) {
+    // No board means no cards — which is the "waiting room" case, never a
+    // closure candidate. A stored plan from when there was a board goes.
+    return room.autoClose
+      ? applyAutoCloseDecision(store, code, { kind: 'clear', reason: 'no_tasks' }, now)
+      : { code, state: 'none' };
+  }
+  const messageCount = await roomMessageCount(store, code);
+  const decision = decideRoomAutoClose({ room, board, messageCount, now, graceMinutes });
+  return applyAutoCloseDecision(store, code, decision, now);
+}
+
+/** Fold a stored plan into the room summary the dashboard draws. */
+export function autoCloseFields(room: Room): { autoCloseAt?: number; autoClosedAt?: number } {
+  return {
+    ...(room.autoClose ? { autoCloseAt: room.autoClose.dueAt } : {}),
+    ...(room.autoClosedAt ? { autoClosedAt: room.autoClosedAt } : {}),
+  };
+}
+
+export interface AutoCloseSweepResult {
+  checked: number;
+  armed: number;
+  deferred: number;
+  cleared: number;
+  closed: number;
+  /** Rooms this sweep actually closed, with their archive ids. */
+  closedRooms: Array<{ code: string; archiveId?: string }>;
+}
+
+/**
+ * Close whatever is due, and tidy whatever is not.
+ *
+ * Bounded on purpose: at most `limit` due rooms are handled per call, because
+ * this runs inside a request somebody is waiting for (a dashboard poll, a
+ * listen). Everything else is left for the next trigger — the index keeps the
+ * rest, and the deadline is a deadline, not a stopwatch.
+ *
+ * Reading armed rooms from the index first is what makes the common case cheap:
+ * an office where nothing is scheduled pays one SMEMBERS and returns.
+ */
+export async function sweepAutoCloseRooms(
+  store: UpstashClient,
+  options: { now?: number; limit?: number; settings?: OfficeSettings } = {},
+): Promise<AutoCloseSweepResult> {
+  const now = options.now ?? Date.now();
+  const limit = Math.max(1, Math.min(AUTO_CLOSE_SWEEP_LIMIT, options.limit ?? AUTO_CLOSE_SWEEP_LIMIT));
+  const result: AutoCloseSweepResult = { checked: 0, armed: 0, deferred: 0, cleared: 0, closed: 0, closedRooms: [] };
+  const armedCodes = await listArmedAutoCloseRooms(store).catch(() => [] as string[]);
+  if (armedCodes.length === 0) return result;
+  const settings = options.settings ?? await getOfficeSettings(store).catch(() => OFFICE_DEFAULT_SETTINGS);
+  let handled = 0;
+  for (const code of armedCodes) {
+    if (handled >= limit) break;
+    const room = await getArmedRoom(store, code);
+    if (!room) {
+      await unindexRoomAutoClose(store, code).catch(() => undefined);
+      continue;
+    }
+    if (room.status !== 'active' || !room.autoClose) {
+      // Ended by a person, or already swept: both mean the entry is done with.
+      await unindexRoomAutoClose(store, code).catch(() => undefined);
+      if (room.autoClose) await clearRoomAutoClose(store, code).catch(() => false);
+      continue;
+    }
+    // Not due yet: skip without reading the board, which is the whole point of
+    // the index. A room whose work came back is corrected by the next task
+    // write (that path always recomputes), not by this loop.
+    if (room.autoClose.dueAt > now) continue;
+    handled += 1;
+    result.checked += 1;
+    const outcome = await syncRoomAutoClose(store, code, { now, settings });
+    if (outcome.state === 'closed') {
+      result.closed += 1;
+      result.closedRooms.push({ code, ...(outcome.archiveId ? { archiveId: outcome.archiveId } : {}) });
+    } else if (outcome.state === 'cleared') result.cleared += 1;
+    else if (outcome.state === 'armed') result.armed += 1;
+    else if (outcome.state === 'deferred') result.deferred += 1;
+  }
+  return result;
 }

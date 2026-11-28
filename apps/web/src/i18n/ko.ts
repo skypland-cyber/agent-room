@@ -190,6 +190,10 @@ export const ko = {
   'work.room.handedOffTitle': '이 회의실의 남은 업무는 새 회의실에서 이어집니다',
   'work.room.predecessor': '{code} 이어받음',
   'work.room.predecessorTitle': '앞선 회의실에서 승계된 회의실입니다',
+  'work.room.autoCloseIn': '자동 종료까지 {minutes}분',
+  'work.room.autoCloseTitle': '모든 업무가 완료되어 자동으로 마무리됩니다. 새 업무나 대화가 있으면 미뤄집니다.',
+  'work.room.autoClosed': '자동 종료',
+  'work.room.autoClosedTitle': '모든 업무가 완료되어 스스로 종료한 회의실입니다',
   'work.room.handoffNote': '승계 시 미완료 업무·프로젝트 기억·결과물 목록이 새 방으로 복사됩니다.',
 
   // ── staff panel ─────────────────────────────────────────────────────────
@@ -354,6 +358,8 @@ export const ko = {
   'limits.rules.defaultLimit': '직원 1인당 하루 업무 수',
   'limits.rules.autoRetry': '인수인계 전 자동 재시도',
   'limits.rules.autoHandoff': '재시도를 다 쓰면 실패한 업무를 동료 직원에게 인수인계',
+  'limits.rules.autoClose': '자동 종료 (분)',
+  'limits.rules.autoCloseHint': '모든 업무가 끝난 회의실이 스스로 마무리되기까지 기다리는 시간입니다. 0이면 자동 종료를 끕니다.',
   'limits.rules.requireQa': '완료한 업무에 동료 QA를 필수로',
   'limits.rules.save': '규칙 저장',
   'limits.rules.saved': '규칙을 저장했습니다.',

@@ -1,6 +1,6 @@
 import { isValidCode } from '@agent-room/shared';
 import { siteUrl } from './_siteUrl.js';
-import { OfficeApiError, assertAgentCapacity, noteAgentTask, officeSeatName } from './_office.js';
+import { OfficeApiError, assertAgentCapacity, noteAgentTask, officeSeatName, sweepAutoCloseRooms } from './_office.js';
 import { assertHostFor } from './_mcpRoomClient.js';
 import { findSeat, type McpGrant } from './_roomAccess.js';
 import { NotionError, createNotionClient, notionConfig } from './_notion/client.js';
@@ -95,6 +95,25 @@ export type WakeOn = 'any' | 'addressed';
 
 const LISTEN_DEFAULT_MS = 40_000;
 const LISTEN_MAX_MS = 240_000;
+
+// Closing a room whose work is done needs a clock, and a serverless deployment
+// has none: the listen loop is the most frequent request this server gets, so
+// it is also the most natural tick. But it is *every* 30-60 seconds per seated
+// agent, and a scheduled close does not need that resolution — so the sweep is
+// held to once a minute per warm instance. A cold instance sweeps once on its
+// first listen, which is the point: the check rides on traffic that was going
+// to happen anyway, and costs one SMEMBERS when nothing is scheduled.
+let lastAutoCloseSweepAt = 0;
+const AUTO_CLOSE_SWEEP_EVERY_MS = 60_000;
+// Re-exported for tests: reset the throttle so a test does not have to sleep.
+export function resetAutoCloseSweepClockForTests(): void { lastAutoCloseSweepAt = 0; }
+
+async function maybeSweepAutoClose(store: Parameters<typeof sweepAutoCloseRooms>[0]): Promise<void> {
+  const now = Date.now();
+  if (now - lastAutoCloseSweepAt < AUTO_CLOSE_SWEEP_EVERY_MS) return;
+  lastAutoCloseSweepAt = now;
+  await sweepAutoCloseRooms(store, { limit: 1 }).catch(() => undefined);
+}
 
 const NEXT_LISTEN = (code: string, cursor: number): string =>
   AGENT_ROOM_CODEX_CONTINUE + '\n' +
@@ -1789,6 +1808,9 @@ async function dispatch(
     case 'room_listen': {
       const since = typeof a.since === 'number' ? a.since : 0;
       const selfName = typeof a.name === 'string' && a.name.trim() ? a.name.trim() : undefined;
+      // The deadline check (see maybeSweepAutoClose). Runs before the hold, so
+      // a room that is due closes now rather than after this listen returns.
+      await maybeSweepAutoClose(client.store);
       // Presence for the office dashboard. Throttled inside the store (one write
       // per 30s per name), so a fast listen loop costs one read, not one write.
       if (selfName) {

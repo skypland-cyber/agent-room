@@ -741,6 +741,14 @@ export interface OfficeSettings {
   autoHandoff: boolean;
   /** Require a peer QA pass before a completed task is marked done. */
   requireQa: boolean;
+  /**
+   * Grace period, in minutes, before a room whose board is fully done is
+   * archived and closed automatically. 0 disables the rule. A room with no
+   * cards is never a candidate, and any new card / card leaving `done` / new
+   * message inside the window cancels or postpones the close.
+   * `AUTO_CLOSE_EMPTY_ROOM_MINUTES` in the deployment overrides this.
+   */
+  autoCloseEmptyRoomMinutes: number;
 }
 
 export const OFFICE_DEFAULT_SETTINGS: OfficeSettings = {
@@ -751,6 +759,7 @@ export const OFFICE_DEFAULT_SETTINGS: OfficeSettings = {
   autoRetryLimit: 2,
   autoHandoff: true,
   requireQa: false,
+  autoCloseEmptyRoomMinutes: 10,
 };
 
 export function normalizeOfficeSettings(input: Partial<Record<keyof OfficeSettings, unknown>>): OfficeSettings {
@@ -768,6 +777,10 @@ export function normalizeOfficeSettings(input: Partial<Record<keyof OfficeSettin
     autoRetryLimit: num(input.autoRetryLimit, OFFICE_DEFAULT_SETTINGS.autoRetryLimit, 0, 10),
     autoHandoff: bool(input.autoHandoff, OFFICE_DEFAULT_SETTINGS.autoHandoff),
     requireQa: bool(input.requireQa, OFFICE_DEFAULT_SETTINGS.requireQa),
+    // 0 is a real choice (off); a missing or unusable value keeps the default.
+    autoCloseEmptyRoomMinutes: input.autoCloseEmptyRoomMinutes === 0 || input.autoCloseEmptyRoomMinutes === '0'
+      ? 0
+      : num(input.autoCloseEmptyRoomMinutes, OFFICE_DEFAULT_SETTINGS.autoCloseEmptyRoomMinutes, 1, 24 * 60),
   };
 }
 
@@ -833,6 +846,14 @@ export interface OfficeRoomSummary {
   successorRoomCode?: string;
   /** The room this one continues, if it was opened by a handoff. */
   predecessorRoomCode?: string;
+  /**
+   * Epoch ms when this room will close by itself because every card on its
+   * board is done (null of absent = no close scheduled). The dashboard shows
+   * the remaining time, and the same deadline is what the server acts on.
+   */
+  autoCloseAt?: number;
+  /** Epoch ms when the room was actually closed by that rule. */
+  autoClosedAt?: number;
 }
 
 export interface OfficeIntegrations {
