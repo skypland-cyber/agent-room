@@ -54,7 +54,7 @@ function overview(extra: Partial<OfficeOverview> = {}): OfficeOverview {
     usage: {
       day: '2026-11-27', requests: 1, writeRequests: 0, requestBudget: 10_000, requestLevel: 'ok', percent: 0, agents: [], notes: [],
     },
-    settings: { dailyRequestBudget: 10_000, warnRatio: 0.8, defaultAgentDailyLimit: 20, offlineAfterMs: 600_000, autoRetryLimit: 2, autoHandoff: true, requireQa: false },
+    settings: { dailyRequestBudget: 10_000, warnRatio: 0.8, defaultAgentDailyLimit: 20, offlineAfterMs: 600_000, autoRetryLimit: 2, autoHandoff: true, requireQa: false, autoCloseEmptyRoomMinutes: 10 },
     integrations: { redis: true, storage: true, mcpGrants: 1, adminConfigured: true },
     counts: { agents: 0, onlineAgents: 0, projects: 0, openTasks: 0, pendingApproval: 0, archivedMeetings: 0, templates: 0 },
     archives: [],

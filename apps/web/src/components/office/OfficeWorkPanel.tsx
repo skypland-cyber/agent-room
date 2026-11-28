@@ -182,6 +182,18 @@ export function OfficeWorkPanel({ overview, onChanged }: Props) {
                       </a>
                       <div className="flex flex-wrap items-center gap-1">
                         <Badge tone={live ? 'good' : 'neutral'}>{roomStatusLabel(room.status)}</Badge>
+                        {live && room.autoCloseAt ? (
+                          <span title={t('work.room.autoCloseTitle')}>
+                            <Badge tone="info">
+                              {t('work.room.autoCloseIn', { minutes: Math.max(1, Math.ceil((room.autoCloseAt - Date.now()) / 60_000)) })}
+                            </Badge>
+                          </span>
+                        ) : null}
+                        {!live && room.autoClosedAt ? (
+                          <span title={t('work.room.autoClosedTitle')}>
+                            <Badge tone="neutral">{t('work.room.autoClosed')}</Badge>
+                          </span>
+                        ) : null}
                         <Badge tone={expiryTone}>
                           {room.daysLeft > 0
                             ? t('work.room.dday', { days: room.daysLeft })

@@ -21,3 +21,4 @@ export * from './vault.js';
 export * from './office.js';
 export * from './handoff.js';
 export * from './linkRecovery.js';
+export * from './roomAutoClose.js';

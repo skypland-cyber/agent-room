@@ -3,7 +3,7 @@
 //   GET  /api/notion                    → `status`
 //   GET  /api/notion?action=selftest    → read-only verification
 //   POST /api/notion { action }         → status | bootstrap | selftest | repair |
-//                                         drain | backfill
+//                                         drain | backfill | cron
 //
 // One function, one `action` field, exactly like `api/office.ts`: the free plan
 // gives this project a small number of Serverless Functions and the repository
@@ -17,7 +17,7 @@
 // uses, rather than an empty 401.
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { officeAuthState, sessionFromRequest, setupInstructions } from './_officeAuth.js';
-import { OfficeApiError, audit, officeStore } from './_office.js';
+import { OfficeApiError, audit, officeStore, sweepAutoCloseRooms } from './_office.js';
 import { digest, withinRateLimit } from './_roomAccess.js';
 import {
   NotionError,
@@ -171,7 +171,7 @@ async function handleStatus(req: VercelRequest, res: VercelResponse, store: Stor
       fulltext: config.minutesFulltext,
       maxChars: config.minutesMaxChars,
     },
-    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill', 'budget'],
+    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill', 'budget', 'cron'],
   };
   // The month's row numbers live in Redis, so the dashboard can show "92 / 300
   // rows · warning" without spending a single Notion call (§5.5, Phase 5 card).
@@ -290,6 +290,77 @@ async function handleDrain(req: VercelRequest, res: VercelResponse, store: Store
   send(res, 200, { ok: report.failed === 0 && report.dead === 0, mode: config.syncMode, ...report });
 }
 
+/**
+ * `cron`: the deployment's out-of-band tick.
+ *
+ * Vercel's Hobby plan runs one cron a day, and a `cron` entry in `vercel.json`
+ * cannot carry the office session cookie — so this action takes a shared secret
+ * instead (`CRON_SECRET`, sent as `Authorization: Bearer …` or `x-cron-secret`),
+ * and falls back to the owner session when no secret is set, which is what a
+ * manual run from the dashboard looks like.
+ *
+ * What it does: the checks that are about the passing of time rather than about
+ * a request. Today that is closing rooms whose boards are fully done (the
+ * deadline is enforced on every path that sees traffic too, so the cron is a
+ * backstop for a quiet day), plus draining the Notion outbox when Notion is
+ * configured. Every part is best-effort and reports what it did; one failing
+ * half must not make the other half look broken.
+ */
+async function handleCron(req: VercelRequest, res: VercelResponse, store: Store): Promise<void> {
+  const secret = (process.env.CRON_SECRET ?? '').trim();
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const presented = String(
+    req.headers['x-cron-secret']
+    ?? (String(req.headers['authorization'] ?? '').startsWith('Bearer ')
+      ? String(req.headers['authorization']).slice('Bearer '.length)
+      : ''),
+  ).trim();
+  if (secret) {
+    if (presented !== secret) {
+      send(res, 401, { error: 'cron_unauthorized', message: 'Send CRON_SECRET as a bearer token.' });
+      return;
+    }
+  } else if (!sessionFromRequest(req)) {
+    send(res, 503, {
+      error: 'cron_not_configured',
+      message: 'Set CRON_SECRET on the deployment (or run this from a signed-in dashboard).',
+    });
+    return;
+  }
+
+  const now = Date.now();
+  const autoClose = await sweepAutoCloseRooms(store, { limit: Math.max(1, Math.min(10, Math.round(Number(body.limit) || 3))) })
+    .catch(() => null);
+  if (autoClose && (autoClose.closed > 0 || autoClose.cleared > 0 || autoClose.deferred > 0 || autoClose.armed > 0)) {
+    await audit(store, OWNER, 'room.auto_close_sweep', {
+      detail: `${autoClose.checked} due · ${autoClose.closed} closed · ${autoClose.cleared} cancelled`
+        + `${autoClose.deferred ? ` · ${autoClose.deferred} postponed` : ''}`,
+    }).catch(() => undefined);
+  }
+
+  const config = notionConfig();
+  const drain = config.configured
+    ? await drainOutboxNow(store, { limit: 20, config }).catch(() => null)
+    : null;
+
+  send(res, 200, {
+    ok: true,
+    at: now,
+    autoClose: autoClose
+      ? {
+        checked: autoClose.checked,
+        closed: autoClose.closedRooms,
+        cleared: autoClose.cleared,
+        deferred: autoClose.deferred,
+        armed: autoClose.armed,
+      }
+      : { error: 'unavailable' },
+    notion: drain
+      ? { processed: drain.processed, succeeded: drain.succeeded, failed: drain.failed, dead: drain.dead }
+      : { skipped: config.configured ? 'drain failed' : 'notion not configured' },
+  });
+}
+
 /** `budget`: read the month's row numbers, or raise/lower the allowance. */
 async function handleBudget(req: VercelRequest, res: VercelResponse, store: Store): Promise<void> {
   const body = (req.body ?? {}) as Record<string, unknown>;
@@ -326,8 +397,7 @@ async function handleBudget(req: VercelRequest, res: VercelResponse, store: Stor
   await audit(store, OWNER, 'notion.budget.limit', {
     detail: `monthlyLimit ${limit} · used ${budget.used}/${budget.limit} (${budget.month} KST)`,
   });
-  send(res, 200, { ok: true, budget });
-}
+  send(res, 200, { ok: true, budget });}
 
 /** `backfill`: write what Redis already holds — resumable with `cursor`. */
 async function handleBackfill(req: VercelRequest, res: VercelResponse, store: Store): Promise<void> {
@@ -396,6 +466,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       send(res, 405, { error: 'method_not_allowed', message: 'POST { action } to run a Notion action.' });
       return;
     }
+    // `cron` carries its own gate (CRON_SECRET, or the owner session when no
+    // secret is set), because a scheduler cannot hold a cookie.
+    if (action === 'cron') { await handleCron(req, res, store); return; }
     if (!requireOwner(req, res)) return;
 
     if (action === 'bootstrap') { await handleBootstrap(req, res, store); return; }

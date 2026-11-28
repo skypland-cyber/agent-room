@@ -175,6 +175,12 @@ export function OfficeSettingsPanel({ overview, onChanged }: Props) {
                 <Input type="number" min={0} max={10} value={settings.autoRetryLimit}
                   onChange={event => setSettings({ ...settings, autoRetryLimit: Number(event.target.value) })} />
               </Field>
+              {/* 0 is the off switch, so the field says so rather than pretending
+                  an empty box means "never". */}
+              <Field label={t('limits.rules.autoClose')} hint={t('limits.rules.autoCloseHint')}>
+                <Input type="number" min={0} max={1440} value={settings.autoCloseEmptyRoomMinutes}
+                  onChange={event => setSettings({ ...settings, autoCloseEmptyRoomMinutes: Number(event.target.value) })} />
+              </Field>
             </div>
             <label className="flex items-center gap-2 text-xs text-ink-muted">
               <input type="checkbox" checked={settings.autoHandoff}

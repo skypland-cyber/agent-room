@@ -78,7 +78,7 @@ const overview = {
     agents: agents.map(row => ({ id: row.id, name: row.name, tasksToday: 2, limit: 20, level: 'ok' as const })),
     notes: ['Counts are this office API only.'],
   },
-  settings: { dailyRequestBudget: 10_000, warnRatio: 0.8, defaultAgentDailyLimit: 20, offlineAfterMs: 600_000, autoRetryLimit: 2, autoHandoff: true, requireQa: false },
+  settings: { dailyRequestBudget: 10_000, warnRatio: 0.8, defaultAgentDailyLimit: 20, offlineAfterMs: 600_000, autoRetryLimit: 2, autoHandoff: true, requireQa: false, autoCloseEmptyRoomMinutes: 10 },
   integrations: { redis: true, storage: true, mcpGrants: 1, adminConfigured: true },
   counts: { agents: 5, onlineAgents: 3, projects: 1, openTasks: 3, pendingApproval: 1, archivedMeetings: 1, templates: 1 },
   archives: [{ id: 'arc_1', roomCode: 'QWE-RTY-234', topic: 'Plaque quote', archivedAt: now, summary: '12 messages' }],

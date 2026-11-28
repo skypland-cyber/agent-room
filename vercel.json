@@ -2,6 +2,9 @@
   "buildCommand": "npm run build:ordered",
   "outputDirectory": "apps/web/dist",
   "framework": null,
+  "crons": [
+    { "path": "/api/notion?action=cron", "schedule": "0 15 * * *" }
+  ],
   "rewrites": [
     {
       "source": "/r/:code/report",

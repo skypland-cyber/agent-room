@@ -63,6 +63,7 @@ import {
   roomSummaries,
   seatAgents,
   storageConfigured,
+  sweepAutoCloseRooms,
 } from './_office.js';
 
 export const maxDuration = 60;
@@ -540,6 +541,10 @@ async function handleRooms(store: ReturnType<typeof officeStore>, action: string
     // Best-effort, exactly as the room UI treats it: ending must not fail
     // because the archive is unavailable.
     await captureRoomArchive(store, code, OWNER).catch(() => undefined);
+    // A scheduled auto-close on a room that is already over is a plan that
+    // would fire on nothing; the sweep would tidy it later, but tidying it here
+    // keeps the room document honest for whoever reads it next.
+    await office.clearRoomAutoClose(store, code).catch(() => false);
     await audit(store, OWNER, 'room.end', { roomCode: code, detail: room.topic.slice(0, 120) });
     send(res, 200, { room: { ...summary, status: ended.status, endedAt: ended.endedAt } });
     return;
@@ -894,6 +899,13 @@ async function routeOffice(
   await office.bumpUsage(store, kstDay(Date.now()), 'requests').catch(() => 0);
 
   if (action === 'overview') {
+    // The poll is the deployment's most reliable clock: there is no daemon on
+    // the free tier, and a room that finished its work has to close on a
+    // deadline rather than on somebody remembering to press End. The sweep is
+    // cheap when nothing is scheduled (one SMEMBERS) and bounded when things
+    // are (three rooms at most), and it runs before the cache is read so a
+    // close that just happened is not hidden behind a two-minute-old payload.
+    const swept = await sweepAutoCloseRooms(store).catch(() => null);
     // `freshness: 'fresh'` is the boss asking again by hand (or straight after a
     // write): skip the cached copy, rebuild, and leave the new answer for the
     // polls. Anything else — including a client that sends nothing — reads
@@ -901,13 +913,19 @@ async function routeOffice(
     const { overview, cache } = await getCachedOverview(store, {
       withoutRooms: bool(body.withoutRooms),
       ownerName: 'owner',
-      fresh: str(body.freshness, 20) === 'fresh',
+      fresh: str(body.freshness, 20) === 'fresh' || (swept?.closed ?? 0) > 0,
     });
     res.setHeader('X-Office-Cache', cache);
     send(res, 200, { overview });
     return;
   }
-  if (action === 'rooms.list') { send(res, 200, { rooms: await roomSummaries(store) }); return; }
+  if (action === 'rooms.list') {
+    // Same tick as the overview: a room list read is a moment to close what is
+    // due, so the list cannot show a room that should already be over.
+    await sweepAutoCloseRooms(store).catch(() => undefined);
+    send(res, 200, { rooms: await roomSummaries(store) });
+    return;
+  }
   if (action === 'rooms.end' || action === 'rooms.delete' || action === 'rooms.handoff') { await handleRooms(store, action, body, res); return; }
   if (action === 'audit.list') {
     // `body.action` is the router's opcode ("audit.list"); the log's action

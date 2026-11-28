@@ -13,4 +13,5 @@ export * from './webhooks.js';
 export * from './vault.js';
 export * from './office.js';
 export * from './officeBackup.js';
+export * from './roomAutoClose.js';
 export { sha256Hex } from './sha256.js';
