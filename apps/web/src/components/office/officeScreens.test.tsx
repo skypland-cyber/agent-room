@@ -379,6 +379,33 @@ describe('office screens render', () => {
     expect(html).toContain('보내기');
   });
 
+  it('reads a closed room as read-only and does not pretend it is still loading', () => {
+    const html = renderToStaticMarkup(
+      <TeamChat
+        chat={{
+          room: { code: 'QWE-RTY-234', topic: 'Plaque quote', status: 'ended', createdBy: 'owner', createdAt: now, endedAt: now, replyMode: 'open', participants: [] },
+          messages: [],
+          digest: null,
+          loading: false,
+          error: null,
+          sending: false,
+          sendError: null,
+          send: async () => true,
+          refresh: () => undefined,
+          loadDigest: () => undefined,
+        }}
+        rooms={[]}
+        code="QWE-RTY-234"
+        onCode={() => undefined}
+        agents={agents}
+        onClose={() => undefined}
+      />,
+    );
+    expect(html).toContain('종료된 회의실입니다');
+    expect(html).not.toContain('팀에게 말하기');
+    expect(html).toContain('활성 회의실이 없습니다.');
+  });
+
   it('renders the workshop routines before their status has arrived', () => {
     // The fetch runs in an effect, so the server render is the loading state:
     // no invented schedule and no zero counts.

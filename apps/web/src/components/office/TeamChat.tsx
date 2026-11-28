@@ -146,6 +146,7 @@ function Minutes({ digest, loading, lang }: { digest: OfficeRoomDigest | null; l
 export function TeamChat({ chat, rooms, code, onCode, agents, onClose, onOpenRoom, onSent, className = '' }: TeamChatProps) {
   const { t, lang } = useI18n();
   const [tab, setTab] = useState<Tab>('chat');
+  const [minutesLoading, setMinutesLoading] = useState(false);
   const [draft, setDraft] = useState('');
   const stream = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
@@ -155,8 +156,13 @@ export function TeamChat({ chat, rooms, code, onCode, agents, onClose, onOpenRoo
   // The minutes are read when the tab is opened, and re-read whenever the tab is
   // opened again: the room kept talking while the reader was on the other tab.
   useEffect(() => {
-    if (tab === 'minutes') loadDigest();
+    if (tab !== 'minutes') return;
+    setMinutesLoading(true);
+    loadDigest();
   }, [tab, loadDigest]);
+  useEffect(() => {
+    if (digest) setMinutesLoading(false);
+  }, [digest]);
 
   // Follow the conversation while the reader is at the bottom; leave the scroll
   // alone once they have scrolled up to read something.
@@ -167,7 +173,9 @@ export function TeamChat({ chat, rooms, code, onCode, agents, onClose, onOpenRoo
   }, [messages, tab]);
 
   const waiting = answering(agents, code);
-  const ended = room?.status !== 'active';
+  // A room that has not arrived yet is not an ended room: the composer stays
+  // available and simply disabled until the first answer says otherwise.
+  const ended = Boolean(room) && room!.status !== 'active';
   const activeRooms = rooms.filter(row => row.status === 'active');
 
   const submit = async () => {
@@ -257,7 +265,7 @@ export function TeamChat({ chat, rooms, code, onCode, agents, onClose, onOpenRoo
         ) : error && messages.length === 0 ? (
           <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-2 py-1.5 text-[10px] text-rose-700">{error}</p>
         ) : tab === 'minutes' ? (
-          <Minutes digest={digest} loading={loading} lang={lang} />
+          <Minutes digest={digest} loading={loading || minutesLoading} lang={lang} />
         ) : messages.length === 0 ? (
           <p className="py-6 text-center text-[11px] leading-relaxed text-ink-soft">{room ? t('chat.empty') : t('chat.noRoom')}</p>
         ) : (
