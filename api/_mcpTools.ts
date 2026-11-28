@@ -105,8 +105,6 @@ const LISTEN_MAX_MS = 240_000;
 // to happen anyway, and costs one SMEMBERS when nothing is scheduled.
 let lastAutoCloseSweepAt = 0;
 const AUTO_CLOSE_SWEEP_EVERY_MS = 60_000;
-// Re-exported for tests: reset the throttle so a test does not have to sleep.
-export function resetAutoCloseSweepClockForTests(): void { lastAutoCloseSweepAt = 0; }
 
 async function maybeSweepAutoClose(store: Parameters<typeof sweepAutoCloseRooms>[0]): Promise<void> {
   const now = Date.now();
