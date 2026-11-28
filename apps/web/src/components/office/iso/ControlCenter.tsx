@@ -23,6 +23,7 @@ import type { OfficeAgentView, OfficeOverview } from '@agent-room/shared';
 import { ISO_ZONES, type IsoZoneId } from './isoPlan.js';
 import { isoAlerts, planIso, podBindings } from './isoScene.js';
 import { IsoStage, type StageMode } from './IsoStage.js';
+import { OfficeDiorama } from './OfficeDiorama.js';
 import { lightSpec, nextLightMode, type LightMode } from './isoLight.js';
 import { realityCounts, realityOf } from './isoReality.js';
 import { Badge, Button, Card, timeAgo } from '../ui.js';
@@ -82,6 +83,7 @@ interface Props {
 
 export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onChanged, onOpenTab, onOpenRoom, initialMode = 'observe' }: Props) {
   const { t: tr, lang } = useI18n();
+  const [diorama, setDiorama] = useState(false);
   const [mode, setMode] = useState<StageMode>(initialMode);
   const [lightMode, setLightMode] = useState<LightMode>('auto');
   const [clock, setClock] = useState(() => Date.now());
@@ -122,6 +124,12 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
   // panels taken away, so walking the boss to the cafe and then opening the
   // approval queue does not move the camera or the avatar.
   return (
+    <>
+      <div className="mb-2 flex flex-wrap gap-2">
+        <Button type="button" variant="ghost" aria-pressed={!diorama} onClick={() => setDiorama(false)}>{tr('diorama.standard')}</Button>
+        <Button type="button" variant="ghost" aria-pressed={diorama} onClick={() => setDiorama(true)}>{tr('diorama.view')}</Button>
+      </div>
+      {diorama ? <OfficeDiorama agents={agents} generatedAt={overview.generatedAt} /> : (
     <div className={mode === 'observe' ? '' : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_318px]'}>
       <div className="grid gap-2">
         <IsoStage
@@ -192,6 +200,8 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
         </aside>
       ) : null}
     </div>
+      )}
+    </>
   );
 }
 

@@ -1,4 +1,4 @@
-# Notion: the office's long-term memory (Phases 1–4)
+# Notion: the office's long-term memory (Phases 1–5)
 
 The office keeps its live state in Redis (rooms, boards, chat, heartbeats) and its
 files in the vault. Notion is the third place, and the only one a person reads and
@@ -7,12 +7,12 @@ meeting minutes, reports, digital products, the finance ledger, deliverables, an
 knowledge base. Redis stays the source of truth for live state; Notion gets events
 only, one row each.
 
-This document covers **Phases 1–4** — the client, the schema, the bootstrap, the
+This document covers **Phases 1–5** — the client, the schema, the bootstrap, the
 read path (`knowledge_search` / `knowledge_get`), the write sync (what an office
 event turns into, how a failed write is kept, and what a person's own edits are
 protected from), and Phase 4: `knowledge_save`, the automatic promotion of a
-meeting's decisions, and the month's row budget. The report cron and the
-`/office` Notion card are Phase 5 and are not wired yet.
+meeting's decisions, and the month's row budget. One daily cron publishes the previous KST day and the latest completed
+Monday–Sunday KST week. The signed-in Limits card reads the latest results.
 
 ## The eight databases
 
@@ -201,8 +201,8 @@ notion:v1:outbox:dead         ids that failed more than 5 times
 An item is named after the **row** (`meeting.archived:arc_x`), so an hour of
 failures for one meeting is one item with `attempts: 8`, not eight items. Drains
 happen three ways: one item after any later sync, up to twenty from
-`POST /api/notion { action: "drain" }`, and — once Phase 5 lands — the daily
-cron. A drain attempts each item once and puts a failure at the oldest end of the
+`POST /api/notion { action: "drain" }`, and up to two in the scheduled report job.
+A drain attempts each item once and puts a failure at the oldest end of the
 queue, so one broken row cannot block the others.
 
 Two failures are never queued because they cannot heal by waiting:
@@ -318,9 +318,13 @@ or a changed type, and passes through a rename.
   15–30 minutes. Rows carry the file id and a stable `/office` link; a download link
   is minted on demand.
 
-## Not in these phases
+## Staff manuals
 
-Reports via cron and the `/office` Notion card (Phase 5). `bootstrap` seeds the
+`bootstrap` seeds the
 staff manuals when `NOTION_SYNC_MODE=full` and says `staff seed skipped (mode)`
 otherwise, so a `meta` deployment is visibly meetings-only rather than silently
 partial.
+
+## Scheduled reports
+
+Vercel calls `/api/notion?action=reportCron` once a day at 00:00 UTC (09:00 KST; actual start depends on the scheduler). Set `CRON_SECRET` in the deployment and bootstrap the reports database. Reports are enabled in `NOTION_SYNC_MODE=full`. Each period uses a stable report key and the existing monthly Notion row budget. The Limits card retains the previous saved report when a newer write fails. It reads Redis-backed status and does not call Notion.

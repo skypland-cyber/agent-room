@@ -15,6 +15,7 @@
 // booleans only. Everything that touches Notion needs a session, and an
 // unconfigured deployment says so with the same setup instructions the office
 // uses, rather than an empty 401.
+import { timingSafeEqual } from 'node:crypto';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { officeAuthState, sessionFromRequest, setupInstructions } from './_officeAuth.js';
 import { OfficeApiError, audit, officeStore, sweepAutoCloseRooms } from './_office.js';
@@ -28,6 +29,7 @@ import {
 } from './_notion/client.js';
 import { NOTION_DATABASES, bootstrapNotion, loadNotionSchema, repairNotion, selftestNotion } from './_notion/schema.js';
 import { readBudget, saveMonthlyLimit } from './_notion/budget.js';
+import { readReportStatus, runReportCron } from './_notion/reports.js';
 import {
   BACKFILL_KINDS,
   backfillNotion,
@@ -171,13 +173,15 @@ async function handleStatus(req: VercelRequest, res: VercelResponse, store: Stor
       fulltext: config.minutesFulltext,
       maxChars: config.minutesMaxChars,
     },
-    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill', 'budget', 'cron'],
+    actions: ['status', 'bootstrap', 'selftest', 'repair', 'drain', 'backfill', 'budget', 'cron', 'reportCron'],
   };
   // The month's row numbers live in Redis, so the dashboard can show "92 / 300
   // rows · warning" without spending a single Notion call (§5.5, Phase 5 card).
   if (store) payload.budget = await readBudget(store).catch(() => null);
   if (!auth.configured) payload.setup = setupInstructions(auth);
   if (session) {
+    payload.reports = store ? await readReportStatus(store).catch(() => null) : null;
+    payload.reportSchedule = { enabled: Boolean(store && config.configured && config.syncMode === 'full' && process.env.CRON_SECRET) };
     payload.schema = await schemaSummary(store, normalizeNotionId(process.env.NOTION_ROOT_PAGE_ID), Date.now());
     payload.integrations = { redis: Boolean(store), notion: config.configured };
     // Queue depth is Redis-only; the dashboard card must never cost a call.
@@ -429,6 +433,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const queryAction = Array.isArray(req.query?.action) ? req.query.action[0] : req.query?.action;
   const action = str(req.method === 'GET' ? queryAction : (req.body as Record<string, unknown> | undefined)?.action, 40)
     || 'status';
+
+  if (req.method === 'GET' && action === 'reportCron') {
+    const secret = process.env.CRON_SECRET;
+    const offered = Buffer.from(req.headers.authorization ?? '');
+    const expected = Buffer.from(secret ? 'Bearer ' + secret : '');
+    if (!secret || offered.length !== expected.length || !timingSafeEqual(offered, expected)) {
+      send(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    try {
+      const result = await runReportCron(officeStore());
+      send(res, Object.values(result.results ?? {}).includes('failed') ? 502 : 200, result);
+    } catch {
+      send(res, 503, { error: 'notion_report_unavailable' });
+    }
+    return;
+  }
 
   let store: Store | null = null;
   try {
