@@ -10,6 +10,7 @@ import type { OfficeAgentView, OfficeOverview } from '@agent-room/shared';
 import { PixelOffice } from './pixel/PixelOffice.js';
 import { ControlCenter } from './iso/ControlCenter.js';
 import { OfficeDiorama } from './iso/OfficeDiorama.js';
+import { TeamChat } from './TeamChat.js';
 import { OfficeWorkshopRoutines } from './OfficeWorkshopRoutines.js';
 import { OfficeAgentPanel } from './pixel/OfficeAgentPanel.js';
 import { OfficeStaffPanel } from './OfficeStaffPanel.js';
@@ -322,6 +323,60 @@ describe('office screens render', () => {
     // The drawer is closed until a badge is pressed, so the page is not a dialog.
     expect(html).not.toContain('showModal');
     expect(html).toContain('<dialog');
+  });
+
+  it('draws the meeting state and the latest lines over the staff', () => {
+    const html = renderToStaticMarkup(
+      <OfficeDiorama
+        agents={agents}
+        generatedAt={now}
+        speech={[
+          { agentId: 'ag_1', kind: 'said', text: '빌드 통과했어요', at: now },
+          { agentId: 'ag_2', kind: 'answering', text: '답변 중…', at: now },
+        ]}
+        meeting={{ label: '회의 중 · 1명', count: 1 }}
+        onToggleChat={() => undefined}
+        chatOpen={false}
+      />,
+    );
+    // The glass room says the room is live, and the toggle names what it opens.
+    expect(html).toContain('회의 중 · 1명');
+    expect(html).toContain('border-dashed');
+    expect(html).toContain('팀 채팅방');
+    // What was said is over the staff, phrased for a screen reader too.
+    expect(html).toContain('Qwen의 최근 발언: 빌드 통과했어요');
+    expect(html).toContain('답변 중…');
+  });
+
+  it('renders the team chat with the room, the conversation and the composer', () => {
+    const html = renderToStaticMarkup(
+      <TeamChat
+        chat={{
+          room: { code: 'QWE-RTY-234', topic: 'Plaque quote', status: 'active', createdBy: 'owner', createdAt: now, replyMode: 'open', participants: [] },
+          messages: [
+            { id: 1, type: 'msg', name: 'Qwen', role: 'Copywriter', color: '#5B6AFF', initials: 'QW', client: 'cc', text: '[DECISION] 황동 도금으로 간다', time: now },
+          ],
+          digest: null,
+          loading: false,
+          error: null,
+          sending: false,
+          sendError: null,
+          send: async () => true,
+          refresh: () => undefined,
+          loadDigest: () => undefined,
+        }}
+        rooms={[{ code: 'QWE-RTY-234', topic: 'Plaque quote', status: 'active', createdAt: now, expiresAt: now, daysLeft: 5, participants: 2, agents: 1, openTasks: 1, doneTasks: 0, pendingApproval: 0 }]}
+        code="QWE-RTY-234"
+        onCode={() => undefined}
+        agents={agents}
+        onClose={() => undefined}
+      />,
+    );
+    expect(html).toContain('팀 채팅방');
+    expect(html).toContain('회의록');
+    expect(html).toContain('[DECISION] 황동 도금으로 간다');
+    expect(html).toContain('팀에게 말하기');
+    expect(html).toContain('보내기');
   });
 
   it('renders the workshop routines before their status has arrived', () => {

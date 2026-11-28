@@ -8,8 +8,10 @@ import type {
   OfficeAgent,
   OfficeArchive,
   OfficeAuditEntry,
+  OfficeChatMessage,
   OfficeOverview,
   OfficeProject,
+  OfficeRoomChat,
   OfficeSettings,
   OfficeTemplate,
 } from '@agent-room/shared';
@@ -145,6 +147,20 @@ export const archiveRoomNow = captureArchive;
 /** Close a room nobody can host any more: minutes archived, room marked ended. */
 export const endRoom = (code: string) =>
   request<{ room: { code: string; status: string; endedAt?: number } }>('rooms.end', { code });
+
+/**
+ * The room's conversation as the office's team chat reads it.
+ *
+ * `since` is the absolute message cursor the panel already holds: a poll that
+ * sends it gets only what arrived since. `digest` asks for the live minutes in
+ * the same answer, so the 회의록 tab is one request rather than three.
+ */
+export const roomChat = (code: string, options: { since?: number; digest?: boolean } = {}) =>
+  request<OfficeRoomChat>('rooms.chat', { code, ...options });
+
+/** "팀에게 말하기": post a line into the room as its host. */
+export const sayToRoom = (code: string, text: string) =>
+  request<{ message: OfficeChatMessage; total?: number }>('rooms.say', { code, text });
 /** Remove a junk room and its data outright — no archive is kept. */
 export const deleteRoom = (code: string) =>
   request<{ deleted: boolean; code: string }>('rooms.delete', { code });

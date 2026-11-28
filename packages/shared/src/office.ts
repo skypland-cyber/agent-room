@@ -11,7 +11,7 @@
 // so the same rules run in the browser dashboard, in the serverless function and
 // in tests without a Redis or a clock of their own.
 
-import type { Message, Room, Task as RoomTask, TaskState } from './types.js';
+import type { ClientKind, Message, MessageKind, Room, Task as RoomTask, TaskState } from './types.js';
 import { linkStateFor, type OfficeLinkState } from './linkRecovery.js';
 
 /**
@@ -692,6 +692,151 @@ export function buildMinutes(input: {
       at: m.time,
     })),
   };
+}
+
+/**
+ * One line of the live minutes: who said it, what was tagged, when.
+ *
+ * `text` has the bracket tag peeled off and its whitespace folded, because the
+ * panel that shows this already prints the tag as the section heading.
+ */
+export interface OfficeRoomDigestItem {
+  name: string;
+  text: string;
+  at: number;
+}
+
+/**
+ * The 회의록 tab of the office's team chat: the same reading of a transcript the
+ * archive makes, but for a room that is still running and without the markdown.
+ *
+ * It is built from the messages the caller already had to read for the chat, so
+ * opening the minutes costs no extra Redis command and can never disagree with
+ * the conversation beside it. Text is trimmed rather than rewritten: the boss
+ * reads the decisions [DECISION] lines carry, not a model's summary of them.
+ */
+export interface OfficeRoomDigest {
+  messageCount: number;
+  /** Distinct speakers, in the order they first spoke. */
+  participants: string[];
+  decisions: OfficeRoomDigestItem[];
+  results: OfficeRoomDigestItem[];
+  openItems: OfficeRoomDigestItem[];
+  board: { total: number; done: number; open: number; pendingApproval: number };
+  tasks: Array<{ id: string; title: string; state: string; owner?: string }>;
+}
+
+/** How many items each tagged section of the digest keeps: the newest ones. */
+export const ROOM_DIGEST_ITEM_LIMIT = 8;
+
+function digestLine(text: string, tag: RegExp): string {
+  return text.replace(tag, '').replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+/**
+ * Build the live minutes of a room from its transcript and its board.
+ *
+ * Sections are only present when they have something in them, and a tagged
+ * line that is nothing but its tag is dropped: an empty heading is worse than
+ * no heading.
+ */
+export function buildRoomDigest(input: {
+  messages: readonly Message[];
+  tasks?: readonly Pick<RoomTask, 'id' | 'title' | 'state' | 'owner'>[];
+}): OfficeRoomDigest {
+  const { messages, tasks = [] } = input;
+  const participants: string[] = [];
+  const seen = new Set<string>();
+  for (const message of messages) {
+    const key = message.name.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    participants.push(message.name.trim());
+  }
+
+  const collect = (pattern: RegExp): OfficeRoomDigestItem[] => {
+    const out: OfficeRoomDigestItem[] = [];
+    for (const message of messages) {
+      if (!pattern.test(message.text)) continue;
+      const text = digestLine(message.text, pattern);
+      if (!text) continue;
+      out.push({ name: message.name, text, at: message.time });
+    }
+    return out.slice(-ROOM_DIGEST_ITEM_LIMIT);
+  };
+
+  const done = tasks.filter(task => task.state === 'done').length;
+  return {
+    messageCount: messages.length,
+    participants,
+    decisions: collect(/\[DECISION\]/gi),
+    results: collect(/\[RESULT\]/gi),
+    openItems: collect(/\[TODO\]/gi),
+    board: {
+      total: tasks.length,
+      done,
+      open: tasks.length - done,
+      pendingApproval: tasks.filter(task => task.state === 'pending_approval').length,
+    },
+    tasks: tasks.slice(0, 40).map(task => ({
+      id: task.id,
+      title: task.title,
+      state: task.state,
+      ...(task.owner ? { owner: task.owner } : {}),
+    })),
+  };
+}
+
+/**
+ * One line of a room as the office's team chat receives it.
+ *
+ * Same shape as the room's own `Message` minus the parts the office cannot use:
+ * attachment URLs are signed per request, so only the label travels (the panel
+ * shows that a file came with the line, and the room screen stays the place to
+ * open it). `event` keeps the system-event type so the panel can tell a handoff
+ * note from an agent talking.
+ */
+export interface OfficeChatMessage {
+  id: number;
+  type: MessageKind;
+  name: string;
+  role: string;
+  color: string;
+  initials: string;
+  client: ClientKind;
+  text: string;
+  time: number;
+  attachments?: Array<{ id: string; name: string; type: string; mime: string; size: number }>;
+  event?: string;
+}
+
+/** The room as the chat panel addresses it: the roster, without any key hashes. */
+export interface OfficeChatRoom {
+  code: string;
+  topic: string;
+  status: string;
+  createdBy: string;
+  createdAt: number;
+  endedAt?: number;
+  replyMode: string;
+  participants: Array<{ name: string; role: string; client: ClientKind; isHost: boolean; muted: boolean }>;
+}
+
+/**
+ * One answer of `rooms.chat`.
+ *
+ * `messages` is a window, not the room: a first read takes the tail, a poll sends
+ * `since` and gets only what arrived, and `total` is the cursor the next poll
+ * sends. `reset` says the window had to jump (a poll that fell more than a
+ * screenful behind), so the panel replaces the transcript instead of appending.
+ */
+export interface OfficeRoomChat {
+  room: OfficeChatRoom;
+  messages: OfficeChatMessage[];
+  total: number;
+  reset?: boolean;
+  /** Only on the 회의록 read: the live minutes of the same transcript. */
+  digest?: OfficeRoomDigest;
 }
 
 /** Case-insensitive keyword match over the title, minutes, summary and messages. */
