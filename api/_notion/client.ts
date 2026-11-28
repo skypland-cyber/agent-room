@@ -74,6 +74,8 @@ export interface NotionConfig {
   minutesMaxChars: number;
   minutesFulltext: boolean;
   rowBudgetMonthly: number;
+  /** `NOTION_AUTO_PROMOTE`: turn a meeting's [DECISION]/[RESULT] lines into knowledge. */
+  autoPromote: boolean;
   queryCacheSeconds: number;
   pageCacheSeconds: number;
   /** `NOTION_DB_MAP`: keys of our eight databases → data source ids to adopt. */
@@ -165,6 +167,9 @@ export function notionConfig(env: NodeJS.ProcessEnv = process.env): NotionConfig
     minutesMaxChars: intValue(env.NOTION_MINUTES_MAX_CHARS, 40_000, 2_000, 40_000),
     minutesFulltext: boolValue(env.NOTION_MINUTES_FULLTEXT),
     rowBudgetMonthly: intValue(env.NOTION_ROW_BUDGET_MONTHLY, 300, 0, 100_000),
+    // On unless switched off: an unset variable is the design's default, and the
+    // design's default is that a finished meeting leaves its decisions behind.
+    autoPromote: text(env.NOTION_AUTO_PROMOTE) === '' ? true : boolValue(env.NOTION_AUTO_PROMOTE),
     queryCacheSeconds: intValue(env.NOTION_QUERY_CACHE_SECONDS, 600, 0, 86_400),
     pageCacheSeconds: intValue(env.NOTION_PAGE_CACHE_SECONDS, 900, 0, 86_400),
     dbMap: parseNotionDbMap(env.NOTION_DB_MAP),
@@ -180,6 +185,8 @@ export type NotionErrorCode =
   | 'notion_forbidden'
   | 'notion_block_limit'
   | 'notion_rate_limited'
+  /** The month's row allowance is spent (our own guard, 429). */
+  | 'row_budget_exceeded'
   | 'notion_timeout'
   | 'notion_unavailable'
   | 'notion_not_found'

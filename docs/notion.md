@@ -1,4 +1,4 @@
-# Notion: the office's long-term memory (Phases 1–3)
+# Notion: the office's long-term memory (Phases 1–4)
 
 The office keeps its live state in Redis (rooms, boards, chat, heartbeats) and its
 files in the vault. Notion is the third place, and the only one a person reads and
@@ -7,11 +7,12 @@ meeting minutes, reports, digital products, the finance ledger, deliverables, an
 knowledge base. Redis stays the source of truth for live state; Notion gets events
 only, one row each.
 
-This document covers **Phases 1–3** — the client, the schema, the bootstrap, the
-read path (`knowledge_search` / `knowledge_get`), and the write sync: what an
-office event turns into, how a failed write is kept, and what a person's own edits
-are protected from. `knowledge_save` and the report cron are Phases 4–5 and are
-not wired yet.
+This document covers **Phases 1–4** — the client, the schema, the bootstrap, the
+read path (`knowledge_search` / `knowledge_get`), the write sync (what an office
+event turns into, how a failed write is kept, and what a person's own edits are
+protected from), and Phase 4: `knowledge_save`, the automatic promotion of a
+meeting's decisions, and the month's row budget. The report cron and the
+`/office` Notion card are Phase 5 and are not wired yet.
 
 ## The eight databases
 
@@ -41,7 +42,8 @@ records which form each database uses.
 | `NOTION_VERSION` | no | `2026-03-11` | Pinned in code; only override deliberately. |
 | `NOTION_MAX_CALLS_PER_REQUEST` | no | `6` | Ceiling for read paths (bootstrap/selftest pass their own). |
 | `NOTION_TIMEOUT_MS` | no | `4000` | Per-call timeout. |
-| `NOTION_ROW_BUDGET_MONTHLY` | no | `300` | Rows per month before the sync is told to stop (Phase 4). |
+| `NOTION_ROW_BUDGET_MONTHLY` | no | `300` | Rows **created** per month (KST) before new rows stop. A person's override in Redis wins (`POST /api/notion {action:"budget"}`). |
+| `NOTION_AUTO_PROMOTE` | no | `1` | `0` turns off the `[DECISION]`/`[RESULT]` → 지식 베이스 promotion. |
 | `NOTION_MINUTES_MODE` | no | `property` | `property` · `body` · `none` — where meeting minutes live. |
 | `NOTION_MINUTES_FULLTEXT` | no | `0` | `1` stores the full transcript in a property (no extra blocks). |
 | `NOTION_DB_MAP` | no | — | JSON `{ "knowledge": "<data source id>", … }` to adopt databases you made by hand. |
@@ -60,12 +62,16 @@ belonging to you should live under that page.
 | `repair` | POST | office session | Re-collects the property ids, puts back a property a person deleted, adopts a database rebuilt by hand, and names the ones that are gone. With `{ "relink": true }` it also restores the Redis links for rows that already exist (`relinked` in the answer). |
 | `drain` | POST | office session | Writes what the outbox kept while Notion was unavailable: up to 20 events, each attempted once. Answers `processed · succeeded · failed · dead` and the per-item results. |
 | `backfill` | POST | office session | Writes what Redis already holds. `{ "kinds": ["meetings"], "limit": 10, "cursor": "projects:12" }` — `nextCursor` continues in the next call, and a row already in sync costs zero Notion calls. |
+| `budget` | POST | office session | Reports the month's row numbers, or sets them: `{ "patch": { "monthlyLimit": 400 } }`, and `{ "monthlyLimit": null }` puts the limit back under `NOTION_ROW_BUDGET_MONTHLY`. Redis only — no Notion call. |
 
 ```bash
 # with the office session cookie from /office
 curl -X POST https://agent-room-henna.vercel.app/api/notion \
   -H 'content-type: application/json' --cookie 'ar_office_session=…' \
   -d '{"action":"bootstrap"}'
+curl -X POST https://agent-room-henna.vercel.app/api/notion \
+  -H 'content-type: application/json' --cookie 'ar_office_session=…' \
+  -d '{"action":"budget","patch":{"monthlyLimit":400}}'
 curl 'https://agent-room-henna.vercel.app/api/notion?action=selftest' --cookie 'ar_office_session=…'
 ```
 
@@ -138,6 +144,9 @@ about a broken connection. An answer that had to stop short says `truncated: tru
 | `notion_not_found` | No page/manual by that id, key, title or name |
 | `notion_invalid_request` | `knowledge_search` with nothing to search for, or an unknown 유형 |
 | `notion_call_budget` | This request reached `NOTION_MAX_CALLS_PER_REQUEST`; ask again (the cache may answer) |
+| `knowledge_write_denied` | The token's grant is `read`: it may search, not save. Ask its owner for `"knowledge": "write"` |
+| `row_budget_exceeded` | The month's row budget is spent; reading still works. Wait for the month, or raise the limit from `/office` |
+| `sync_off` | `knowledge_save` on a deployment whose `NOTION_SYNC_MODE` is `off`/`read`; keep the finding elsewhere for now |
 
 ## Phase 3: the write sync
 
@@ -221,8 +230,72 @@ blocks are freed).
   the meeting row is the task record.
 - A project's `회의` / `결과물` relations are filled from the rows already linked
   at the time the project is saved. Saving the project again refreshes them.
-- `변경 이력` on a knowledge row is Phase 4 (`knowledge_save`), where an explicit
-  edit comes with a previous version to keep.
+- `변경 이력` on a knowledge row is written by Phase 4's `knowledge_save`: a sync
+  event mirrors a memory but does not keep revisions of it.
+
+## Phase 4: `knowledge_save`, promotion, and the row budget
+
+### `knowledge_save` — an AI writing what it learned
+
+Listed only for a token whose grant is `"knowledge": "write"`; a `read` token
+sees `knowledge_search` and `knowledge_get` and is refused `knowledge_write_denied`
+if it calls the save tool anyway (a token with no `knowledge` at all gets
+`unknown_tool`). Twenty saves a minute per token (`notion-save:{grant id}`).
+
+| Input | |
+|---|---|
+| `title` (required) | one line, ≤200 characters |
+| `body` (required) | the knowledge, ≤6,000 characters; longer is clipped and the answer says `bodyTruncated: true` |
+| `id` | revise this row instead of matching by title |
+| `type`, `project`, `tags`, `source`, `source_ref`, `importance` | optional; the select values are the ones bootstrap created |
+| `name`, `code` + `seatKey` | identity: recorded as `작성` when the name is on the roster |
+
+What the answer means:
+
+| `action` | When | Cost |
+|---|---|---|
+| `unchanged` | a row with the same title in the same project (or both project-less) already says the same body | 1 query, **no write**, no budget |
+| `updated` | same row, different body — one line about the previous body is appended to `변경 이력` (last three kept) | 1 write |
+| `created` | no such row | 1 query + 1 write + **1 row of the month's budget** |
+
+Body equality is on a normalised hash (line endings, trailing spaces and runs of
+blank lines folded), so re-saving the same paragraph is free. `rowBudget:
+{ used, limit, month }` is in every answer. A write drops `notion:v1:cache:page:{id}`
+so the next `knowledge_get` reads the new text instead of the old one.
+
+`NOTION_SYNC_MODE=off` (or `read`) answers `sync_off` instead of pretending to
+save. Personal secrets do not belong here — the tool description says so, and the
+vault is the place for them.
+
+### Promotion: a meeting's decisions become knowledge
+
+When `meeting.archived` is synced in `full` mode (and `NOTION_AUTO_PROMOTE` is on),
+the meeting's `[DECISION]` and `[RESULT]` lines — up to **five**, in the order they
+were settled — become **one** 지식 베이스 row: `유형=결정`, `출처=회의`,
+`출처 참조=<room code>`, `중요도=상`, key `<room code>:decision`. `[TODO]` is not
+promoted: it is already the meeting row's 할 일. One row per meeting rather than
+one per line, because the row is the block being rationed.
+
+A re-archived meeting updates its own row (same key); an identical re-announcement
+costs nothing; `meta` mode writes no knowledge at all.
+
+### The month's row budget
+
+`notion:v1:rows:{YYYY-MM}` (KST) counts the rows **created** this month. Updates,
+unchanged saves and reads count zero, because they do not consume a block.
+
+| Where the month stands | What happens |
+|---|---|
+| `used ≥ ⌈limit × 0.8⌉` | one `notion.budget.warn` audit line per month; `budget.warn: true` in `status` |
+| `used ≥ limit` | no new rows: a sync event is kept in the outbox (`notion.budget.stop`, once a month), `knowledge_save` answers `row_budget_exceeded` with the numbers, reads and caches keep working |
+| a person raises the limit | `POST /api/notion { action: "budget", patch: { monthlyLimit } }`; the held event drains into a row |
+
+`GET /api/notion?action=status` carries `budget: { month, used, limit, warn }` from
+Redis only — the dashboard never spends a Notion call to show it.
+
+A drain that meets a full month **holds** the item: it goes back to the oldest end
+of the queue with its attempts untouched, so five drains in a full month cannot
+bury a meeting as dead before the month turns.
 
 ## Properties are addressed by id
 
@@ -247,7 +320,7 @@ or a changed type, and passes through a rename.
 
 ## Not in these phases
 
-`knowledge_save` (Phase 4, with the row budget guard), reports via cron, and the
-`/office` Notion card (Phase 5). `bootstrap` seeds the staff manuals when
-`NOTION_SYNC_MODE=full` and says `staff seed skipped (mode)` otherwise, so a
-`meta` deployment is visibly meetings-only rather than silently partial.
+Reports via cron and the `/office` Notion card (Phase 5). `bootstrap` seeds the
+staff manuals when `NOTION_SYNC_MODE=full` and says `staff seed skipped (mode)`
+otherwise, so a `meta` deployment is visibly meetings-only rather than silently
+partial.
