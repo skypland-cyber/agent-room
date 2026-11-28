@@ -181,8 +181,19 @@ export function TeamChat({ chat, rooms, code, onCode, agents, onClose, onOpenRoo
   const submit = async () => {
     const text = draft.trim();
     if (!text) return;
+    // Sending is the reader saying something: follow the conversation even if
+    // they had scrolled up to read an older line.
     const ok = await send(text);
-    if (ok) { setDraft(''); onSent?.(); }
+    if (ok) {
+      stuck.current = true;
+      setDraft('');
+      onSent?.();
+      // Follow the line that was just posted, whatever the scroll was doing.
+      window.requestAnimationFrame(() => {
+        const element = stream.current;
+        if (element) element.scrollTop = element.scrollHeight;
+      });
+    }
   };
 
   return (
