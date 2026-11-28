@@ -125,9 +125,11 @@ export function ControlCenter({ overview, selectedId, onSelect, onAddStaff, onCh
   // approval queue does not move the camera or the avatar.
   return (
     <>
-      <div className="mb-2 flex flex-wrap gap-2">
-        <Button type="button" variant="ghost" aria-pressed={!diorama} onClick={() => setDiorama(false)}>{tr('diorama.standard')}</Button>
-        <Button type="button" variant="ghost" aria-pressed={diorama} onClick={() => setDiorama(true)}>{tr('diorama.view')}</Button>
+      {/* Two ways to look at the floor. On a phone they share the width instead
+          of stacking half-clipped under the sticky header. */}
+      <div className="mb-2 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+        <Button type="button" variant="ghost" className="!w-full !justify-center whitespace-nowrap sm:!w-auto" aria-pressed={!diorama} onClick={() => setDiorama(false)}>{tr('diorama.standard')}</Button>
+        <Button type="button" variant="ghost" className="!w-full !justify-center whitespace-nowrap sm:!w-auto" aria-pressed={diorama} onClick={() => setDiorama(true)}>{tr('diorama.view')}</Button>
       </div>
       {diorama ? <OfficeDiorama agents={agents} generatedAt={overview.generatedAt} /> : (
     <div className={mode === 'observe' ? '' : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_318px]'}>
